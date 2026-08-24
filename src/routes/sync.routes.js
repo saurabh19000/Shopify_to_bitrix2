@@ -41,14 +41,31 @@ const resolveShopifyCreds = async () => {
 };
 
 // Given a Bitrix contact object, find or create the matching Shopify customer.
+// Email OR phone identifies the customer — phone-only CRM contacts are supported.
 const ensureShopifyCustomerForContact = async (contact, creds) => {
   if (contact.UF_CRM_SHOPIFY_ID) return { id: String(contact.UF_CRM_SHOPIFY_ID), linked: false };
   const email = contact.EMAIL && contact.EMAIL[0] ? contact.EMAIL[0].VALUE : '';
-  if (!email) return null;
-  const existing = await shopifyService.findShopifyCustomerByEmail(email, creds.shopDomain, creds.accessToken);
+  const phone = contact.PHONE && contact.PHONE[0] ? contact.PHONE[0].VALUE : '';
+  if (!email && !phone) return null;
+
+  let existing = null;
+  if (email) existing = await shopifyService.findShopifyCustomerByEmail(email, creds.shopDomain, creds.accessToken);
+  if (!existing && phone) existing = await shopifyService.findShopifyCustomerByPhone(phone, creds.shopDomain, creds.accessToken);
   if (existing) return { id: existing.id, linked: true };
-  const created = await shopifyService.createShopifyCustomer(contact, creds.shopDomain, creds.accessToken);
-  return created ? { id: created.id, linked: false } : null;
+
+  try {
+    const created = await shopifyService.createShopifyCustomer(contact, creds.shopDomain, creds.accessToken);
+    return created ? { id: created.id, linked: false } : null;
+  } catch (err) {
+    // 422 = email/phone already taken on the portal — find that customer and link it.
+    if (err.duplicate) {
+      debug('twoway', 'ensureShopifyCustomerForContact: creation rejected as duplicate — searching once more');
+      const dup = (email && await shopifyService.findShopifyCustomerByEmail(email, creds.shopDomain, creds.accessToken)) ||
+                  (phone && await shopifyService.findShopifyCustomerByPhone(phone, creds.shopDomain, creds.accessToken));
+      if (dup) return { id: dup.id, linked: true };
+    }
+    throw err;
+  }
 };
 
 // ==================== CONTACTS ====================
@@ -96,13 +113,20 @@ router.post('/bitrix/contact-update', authorize, async (req, res) => {
     }
 
     const email = contact.EMAIL && contact.EMAIL[0] ? contact.EMAIL[0].VALUE : '';
-    if (!email) {
-      console.log(`[TwoWay][Contact] No UF_CRM_SHOPIFY_ID and no email — nothing to push`);
-      return res.status(200).send('No UF_CRM_SHOPIFY_ID and no email — nothing to push');
+    const phone = contact.PHONE && contact.PHONE[0] ? contact.PHONE[0].VALUE : '';
+    if (!email && !phone) {
+      console.log(`[TwoWay][Contact] No UF_CRM_SHOPIFY_ID, no email AND no phone — nothing to push`);
+      return res.status(200).send('No UF_CRM_SHOPIFY_ID, no email and no phone — nothing to push');
     }
 
-    console.log(`[TwoWay][Contact] No Shopify ID. Searching Shopify by email "${email}"...`);
-    const existingCustomer = await shopifyService.findShopifyCustomerByEmail(email, creds.shopDomain, creds.accessToken);
+    console.log(`[TwoWay][Contact] No Shopify ID. Searching Shopify by ${email ? `email "${email}"` : ''}${email && phone ? ' and ' : ''}${phone ? `phone "${phone}"` : ''}...`);
+    let existingCustomer = null;
+    if (email) existingCustomer = await shopifyService.findShopifyCustomerByEmail(email, creds.shopDomain, creds.accessToken);
+    if (!existingCustomer && phone) {
+      debug('twoway', `contact-update: email search missed — trying phone "${phone}"`);
+      existingCustomer = await shopifyService.findShopifyCustomerByPhone(phone, creds.shopDomain, creds.accessToken);
+    }
+
     if (existingCustomer) {
       console.log(`[TwoWay][Contact] Found existing Shopify customer ${existingCustomer.id} — linking and pushing update...`);
       await bitrixService.updateContact(contactId, { UF_CRM_SHOPIFY_ID: String(existingCustomer.id) });
@@ -113,6 +137,11 @@ router.post('/bitrix/contact-update', authorize, async (req, res) => {
 
     console.log(`[TwoWay][Contact] Not found in Shopify. Creating new customer...`);
     const newCustomer = await shopifyService.createShopifyCustomer(contact, creds.shopDomain, creds.accessToken);
+    if (newCustomer) {
+      await bitrixService.updateContact(contactId, { UF_CRM_SHOPIFY_ID: String(newCustomer.id) });
+      console.log(`[TwoWay][Contact] SUCCESS — Created new Shopify customer ${newCustomer.id} from Bitrix contact ${contactId}`);
+      return res.status(200).send('OK');
+    }
     if (newCustomer) {
       await bitrixService.updateContact(contactId, { UF_CRM_SHOPIFY_ID: String(newCustomer.id) });
       console.log(`[TwoWay][Contact] SUCCESS — Created new Shopify customer ${newCustomer.id} from Bitrix contact ${contactId}`);
@@ -177,7 +206,7 @@ router.post('/bitrix/deal-update', authorize, async (req, res) => {
       if (contact) {
         customerRef = await ensureShopifyCustomerForContact(contact, creds);
         if (!customerRef) {
-          console.log(`[TwoWay][Deal] Contact ${deal.CONTACT_ID} has no email and no Shopify mapping — cannot attach customer to order`);
+          console.log(`[TwoWay][Deal] Contact ${deal.CONTACT_ID} has neither email nor phone — cannot attach a customer to the order`);
         } else if (customerRef.linked && contact.ID) {
           await bitrixService.updateContact(contact.ID, { UF_CRM_SHOPIFY_ID: String(customerRef.id) });
           console.log(`[TwoWay][Deal] Linked existing Shopify customer ${customerRef.id} to Bitrix contact ${contact.ID}`);

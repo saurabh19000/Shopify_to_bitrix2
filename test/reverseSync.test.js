@@ -68,6 +68,11 @@ const createFakePortal = () => {
       EMAIL: [{ VALUE: 'jane@bitrix.test', VALUE_TYPE: 'WORK' }],
       PHONE: [{ VALUE: '+911234567890', VALUE_TYPE: 'WORK' }]
     },
+    contact777: {
+      ID: '777', NAME: 'PhoneOnly', LAST_NAME: 'Patel',
+      UF_CRM_SHOPIFY_ID: '',
+      PHONE: [{ VALUE: '+919999999999', VALUE_TYPE: 'WORK' }]
+    },
     product: {},
     deal: {}
   };
@@ -84,11 +89,12 @@ const createFakePortal = () => {
       let result;
       switch (url) {
         case 'crm.contact.get':
-          result = state.contact501;
+          result = String(payload.id) === '777' ? state.contact777 : state.contact501;
           break;
         case 'crm.contact.update':
           if (payload.fields && payload.fields.UF_CRM_SHOPIFY_ID) {
-            state.contact501.UF_CRM_SHOPIFY_ID = payload.fields.UF_CRM_SHOPIFY_ID;
+            const target = String(payload.id) === '777' ? state.contact777 : state.contact501;
+            target.UF_CRM_SHOPIFY_ID = payload.fields.UF_CRM_SHOPIFY_ID;
           }
           result = payload.id;
           break;
@@ -125,6 +131,7 @@ const axios = require('axios');
 let shopifyCalls = []; // { method, url, body }
 let shopifyState = {
   customersByEmail: new Map(),
+  customersByPhone: new Map(),
   draftOrderSeq: 9000,
   variantsByProduct: new Map() // productId -> [{id}]
 };
@@ -136,12 +143,15 @@ const fakeShopify = async (method, url, body) => {
 
   let data;
   if (method === 'get' && path.endsWith('/customers/search.json')) {
-    const email = decodeURIComponent(u.searchParams.get('query') || '').replace('email:', '').toLowerCase();
-    const found = shopifyState.customersByEmail.get(email);
+    const query = decodeURIComponent(u.searchParams.get('query') || '');
+    const found = query.startsWith('phone:')
+      ? shopifyState.customersByPhone.get(query.slice(6))
+      : shopifyState.customersByEmail.get(query.replace('email:', '').toLowerCase());
     data = { customers: found ? [found] : [] };
   } else if (method === 'post' && path.endsWith('/customers.json')) {
-    const c = { ...body.customer, id: 7001 };
+    const c = { ...body.customer, id: shopifyState.customersByEmail.size + shopifyState.customersByPhone.size + 7001 };
     if (c.email) shopifyState.customersByEmail.set(String(c.email).toLowerCase(), c);
+    if (c.phone) shopifyState.customersByPhone.set(String(c.phone), c);
     data = { customer: c };
   } else if (method === 'put' && /\/customers\/\d+\.json$/.test(path)) {
     data = { customer: { ...body.customer, id: Number(path.match(/(\d+)\.json$/)[1]) } };
@@ -226,6 +236,18 @@ const main = async () => {
   check('Credentials came from DATABASE fallback (env token empty)', () => {
     // If fallback failed, route would have returned 500 and no Shopify call would exist.
     assert.ok(shopifyCalls.length > 0, 'no Shopify API calls were made');
+  });
+
+  console.log('\n=== Contact with ONLY phone (no email) ===');
+  const rPhone = await postSync('/bitrix/contact-update', { data: { FIELDS: { ID: '777' } } });
+  check('Phone-only Bitrix contact -> CREATED Shopify customer without email', () => {
+    assert.strictEqual(rPhone.status, 200, `expected 200 got ${rPhone.status}`);
+    const created = shopifyCalls.find((c) => c.method === 'post' && /customers\.json$/.test(c.url) && c.body.customer && c.body.customer.phone === '+919999999999');
+    assert.ok(created, 'phone-only POST customers.json never happened');
+    const createdFake = shopifyState.customersByPhone.get('+919999999999');
+    assert.ok(createdFake, 'phone-only customer was never created in fake Shopify');
+    assert.strictEqual(created.body.customer.email, undefined, 'must NOT send an empty/absent email key');
+    assert.strictEqual(portal.state.contact777.UF_CRM_SHOPIFY_ID, String(createdFake.id), 'customer not linked back into Bitrix');
   });
 
   console.log('\n=== Product creation (Bitrix -> Shopify) ===');

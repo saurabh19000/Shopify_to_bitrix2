@@ -320,29 +320,52 @@ const findShopifyCustomerByEmail = async (email, shopDomain, accessToken) => {
 };
 
 /**
+ * Find a Shopify customer by phone number (fallback when a Bitrix contact
+ * has no email — common for phone-first CRM records).
+ */
+const findShopifyCustomerByPhone = async (phone, shopDomain, accessToken) => {
+  if (!phone) return null;
+  try {
+    debug('shopify', `findShopifyCustomerByPhone: searching "${phone}"`);
+    const response = await axios.get(
+      `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/customers/search.json?query=${encodeURIComponent(`phone:${phone}`)}`,
+      { headers: getAuthHeaders(accessToken) }
+    );
+    const customers = response.data.customers || [];
+    debug('shopify', `findShopifyCustomerByPhone: "${phone}" -> ${customers.length > 0 ? `customer ${customers[0].id}` : 'NOT FOUND'}`);
+    return customers.length > 0 ? customers[0] : null;
+  } catch (err) {
+    console.error('[Shopify] Failed to search customer by phone:', err.message);
+    debug('shopify', `findShopifyCustomerByPhone: FAILED for "${phone}"`, { error: err.message });
+    return null;
+  }
+};
+
+/**
  * Create a new Shopify customer from a Bitrix contact (used by two-way sync).
+ * Email OR phone is enough — phone-only CRM contacts are supported.
  */
 const createShopifyCustomer = async (contact, shopDomain, accessToken) => {
   const email = contact.EMAIL && contact.EMAIL[0] ? contact.EMAIL[0].VALUE : '';
-  if (!email) {
-    debug('shopify', 'createShopifyCustomer: contact has no email — cannot create');
+  const phone = contact.PHONE && contact.PHONE[0] ? contact.PHONE[0].VALUE : '';
+  if (!email && !phone) {
+    debug('shopify', 'createShopifyCustomer: contact has neither email nor phone — cannot create');
     return null;
   }
 
-  const phone = contact.PHONE && contact.PHONE[0] ? contact.PHONE[0].VALUE : '';
-
   const customer = {
     first_name: contact.NAME || '',
-    last_name: contact.LAST_NAME || '',
-    email: email,
-    phone: phone,
-    verified_email: true,
-    tags: (contact.TAG && contact.TAG.length ? contact.TAG.join(', ') : '') || contact.UF_CRM_CUSTOMER_TAGS || '',
-    note: contact.UF_CRM_CUSTOMER_NOTE || ''
+    last_name: contact.LAST_NAME || ''
   };
+  if (email) customer.email = email;
+  if (phone) customer.phone = phone;
+  if (email) customer.verified_email = true;
+  const tags = (contact.TAG && contact.TAG.length ? contact.TAG.join(', ') : '') || contact.UF_CRM_CUSTOMER_TAGS || '';
+  if (tags) customer.tags = tags;
+  if (contact.UF_CRM_CUSTOMER_NOTE) customer.note = contact.UF_CRM_CUSTOMER_NOTE;
 
   try {
-    debug('shopify', `createShopifyCustomer: POST customers (email=${email})`);
+    debug('shopify', `createShopifyCustomer: POST customers (email=${email || 'none'}, phone=${phone || 'none'})`);
     const response = await axios.post(
       `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/customers.json`,
       { customer },
@@ -351,9 +374,11 @@ const createShopifyCustomer = async (contact, shopDomain, accessToken) => {
     debug('shopify', `createShopifyCustomer: OK — created Shopify customer ${response.data.customer?.id}`);
     return response.data.customer;
   } catch (err) {
-    console.error('[Shopify] Failed to create customer:', err.message);
-    debug('shopify', `createShopifyCustomer: FAILED`, { email, error: err.message, responseBody: err.response?.data });
-    return null;
+    // A duplicate (email/phone already taken) returns 422 — surface the body so
+    // we can fall back to linking instead of failing silently.
+    console.error('[Shopify] Failed to create customer:', err.response?.data ? JSON.stringify(err.response.data) : err.message);
+    debug('shopify', `createShopifyCustomer: FAILED`, { email, phone, error: err.message, responseBody: err.response?.data });
+    throw Object.assign(new Error(err.response?.data ? JSON.stringify(err.response.data) : err.message), { status: err.response?.status || 500, duplicate: err.response?.status === 422 });
   }
 };
 
@@ -450,6 +475,7 @@ module.exports = {
   updateShopifyProduct,
   updateShopifyInventory,
   findShopifyCustomerByEmail,
+  findShopifyCustomerByPhone,
   createShopifyCustomer,
   createShopifyProduct,
   createShopifyDraftOrder,
