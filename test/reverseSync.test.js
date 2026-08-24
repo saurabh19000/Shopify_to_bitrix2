@@ -309,6 +309,20 @@ const main = async () => {
     assert.strictEqual(put.body.order.financial_status, 'paid');
   });
 
+  console.log('\n=== Unified event dispatcher ===');
+  const rEv = await postSync('/bitrix/event', { event: 'CRM_PRODUCT_UPDATE', data: { FIELDS: { ID: 'p5' } } });
+  check('Dispatcher routes CRM_PRODUCT_UPDATE to product handler', () => {
+    assert.strictEqual(rEv.status, 200, `expected 200 got ${rEv.status}`);
+    const puts = shopifyCalls.filter((c) => c.method === 'put' && /\/products\/555\.json$/.test(c.url));
+    assert.ok(puts.length >= 2, 'expected the second push via dispatcher');
+  });
+  const rIgn = await postSync('/bitrix/event', { event: 'CRM_QUOTE_ADD', data: { FIELDS: { ID: '1' } } });
+  const ignBody = await rIgn.text();
+  check('Dispatcher ignores unrelated events with 200', () => {
+    assert.strictEqual(rIgn.status, 200);
+    assert.match(ignBody, /ignored/i);
+  });
+
   server.closeAllConnections?.();
   server.close();
   portal.server.closeAllConnections?.();

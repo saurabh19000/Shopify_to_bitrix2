@@ -70,7 +70,7 @@ const ensureShopifyCustomerForContact = async (contact, creds) => {
 
 // ==================== CONTACTS ====================
 
-router.post('/bitrix/contact-update', authorize, async (req, res) => {
+const contactUpdateHandler = async (req, res) => {
   try {
     debug('twoway', 'INBOUND Bitrix contact-update webhook', { body: req.body });
     const data = req.body?.data || {};
@@ -155,11 +155,13 @@ router.post('/bitrix/contact-update', authorize, async (req, res) => {
     debug('twoway', 'contact-update FAILED', { error: err.message });
     res.status(err.status || 500).send(err.message);
   }
-});
+};
+
+router.post('/bitrix/contact-update', authorize, contactUpdateHandler);
 
 // ==================== DEALS / ORDERS ====================
 
-router.post('/bitrix/deal-update', authorize, async (req, res) => {
+const dealUpdateHandler = async (req, res) => {
   try {
     debug('twoway', 'INBOUND Bitrix deal-update webhook', { body: req.body });
     const data = req.body?.data || {};
@@ -295,11 +297,13 @@ router.post('/bitrix/deal-update', authorize, async (req, res) => {
     debug('twoway', 'deal-update FAILED', { error: err.message });
     res.status(err.status || 500).send(err.message);
   }
-});
+};
+
+router.post('/bitrix/deal-update', authorize, dealUpdateHandler);
 
 // ==================== PRODUCTS ====================
 
-router.post('/bitrix/product-update', authorize, async (req, res) => {
+const productUpdateHandler = async (req, res) => {
   try {
     debug('twoway', 'INBOUND Bitrix product-update webhook', { body: req.body });
     const data = req.body?.data || {};
@@ -371,6 +375,53 @@ router.post('/bitrix/product-update', authorize, async (req, res) => {
   } catch (err) {
     console.error(`[TwoWay][Product] FAILED:`, err.message);
     debug('twoway', 'product-update FAILED', { error: err.message });
+    res.status(err.status || 500).send(err.message);
+  }
+};
+
+router.post('/bitrix/product-update', authorize, productUpdateHandler);
+
+// ==================== UNIFIED EVENT DISPATCHER ====================
+// Point ONE Bitrix24 outbound webhook (subscribed to CRM_CONTACT_ADD,
+// CRM_CONTACT_UPDATE, CRM_DEAL_ADD, CRM_DEAL_UPDATE, CRM_PRODUCT_ADD,
+// CRM_PRODUCT_UPDATE) at /sync/bitrix/event — every event is routed to the
+// right handler automatically.
+const EVENT_HANDLERS = {
+  contact: contactUpdateHandler,
+  deal: dealUpdateHandler,
+  product: productUpdateHandler
+};
+
+router.post('/bitrix/event', authorize, async (req, res) => {
+  try {
+    const eventName = String(req.body?.event || '').toUpperCase();
+    const id = req.body?.data?.FIELDS?.ID || req.body?.data?.ID;
+    debug('twoway', `event-dispatcher: received ${eventName}`, { id });
+
+    if (!eventName || !id) {
+      return res.status(400).send('Missing event name or entity ID');
+    }
+
+    if (eventName.endsWith('_DELETE')) {
+      debug('twoway', `event-dispatcher: ${eventName} — delete events are handled by Shopify webhooks; ignoring`);
+      return res.status(200).send('Delete events ignored');
+    }
+
+    let kind = null;
+    if (eventName.includes('CONTACT')) kind = 'contact';
+    else if (eventName.includes('DEAL') || eventName.includes('ORDER')) kind = 'deal';
+    else if (eventName.includes('PRODUCT')) kind = 'product';
+
+    if (!kind) {
+      debug('twoway', `event-dispatcher: ${eventName} not mapped to an entity — ignoring`);
+      return res.status(200).send(`Event ${eventName} ignored`);
+    }
+
+    req.body = { event: eventName, data: { FIELDS: { ID: String(id) } } };
+    return await EVENT_HANDLERS[kind](req, res);
+  } catch (err) {
+    console.error('[TwoWay][Dispatcher] FAILED:', err.message);
+    debug('twoway', 'event-dispatcher FAILED', { error: err.message });
     res.status(err.status || 500).send(err.message);
   }
 });
