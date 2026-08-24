@@ -1,0 +1,8 @@
+node_modules/
+.env
+src/shopTokens.json
+src/idMap.json
+*.log
+.DS_Store
+_tunnel_test.js
+_debug_test.js

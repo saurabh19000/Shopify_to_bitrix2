@@ -1,0 +1,17 @@
+{
+  "name": "shopify-to-bitrix24-integration-backend",
+  "version": "1.0.0",
+  "description": "MVP backend for Shopify to Bitrix24 CRM real-time integration",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "body-parser": "^1.20.3",
+    "crypto": "^1.0.1",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pg": "^8.22.0"
+  }
+}
