@@ -4,7 +4,8 @@ const bitrixService = require('../services/bitrix.service');
 const shopifyService = require('../services/shopify.service');
 const config = require('../config/bitrix.config');
 const { getTenantConfig } = require('../utils/tenantContext');
-const { getMappingWithFallback } = require('../utils/idMapStore');
+const { getMappingWithFallback, setMapping } = require('../utils/idMapStore');
+const { getToken } = require('../utils/tokenStore');
 const { debug } = require('../utils/debugLogger');
 
 const authorize = (req, res, next) => {
@@ -21,6 +22,33 @@ const authorize = (req, res, next) => {
     return res.status(401).send('Unauthorized');
   }
   next();
+};
+
+const cleanDomain = (d) => String(d || '').replace(/^https?:\/\//i, '').replace(/\/$/, '');
+
+// Resolves Shopify creds from .env, falling back to the OAuth access token
+// stored in the database (saved by /auth/callback). Without this fallback every
+// reverse-sync push fails with "credentials not configured" on OAuth installs.
+const resolveShopifyCreds = async () => {
+  const cfg = getTenantConfig();
+  const shopDomain = cleanDomain(cfg.storeDomain);
+  let accessToken = cfg.accessToken;
+  if (!accessToken && shopDomain) {
+    debug('twoway', `resolveShopifyCreds: no SHOPIFY_ACCESS_TOKEN in env — trying OAuth token from database for ${shopDomain}`);
+    accessToken = (await getToken(shopDomain)) || '';
+  }
+  return { shopDomain, accessToken };
+};
+
+// Given a Bitrix contact object, find or create the matching Shopify customer.
+const ensureShopifyCustomerForContact = async (contact, creds) => {
+  if (contact.UF_CRM_SHOPIFY_ID) return { id: String(contact.UF_CRM_SHOPIFY_ID), linked: false };
+  const email = contact.EMAIL && contact.EMAIL[0] ? contact.EMAIL[0].VALUE : '';
+  if (!email) return null;
+  const existing = await shopifyService.findShopifyCustomerByEmail(email, creds.shopDomain, creds.accessToken);
+  if (existing) return { id: existing.id, linked: true };
+  const created = await shopifyService.createShopifyCustomer(contact, creds.shopDomain, creds.accessToken);
+  return created ? { id: created.id, linked: false } : null;
 };
 
 // ==================== CONTACTS ====================
@@ -53,15 +81,16 @@ router.post('/bitrix/contact-update', authorize, async (req, res) => {
     });
 
     const shopifyId = contact.UF_CRM_SHOPIFY_ID;
-    const { storeDomain: shopDomain, accessToken } = getTenantConfig();
-    if (!shopDomain || !accessToken) {
-      console.log(`[TwoWay][Contact] Shopify credentials not configured`);
+    const creds = await resolveShopifyCreds();
+    if (!creds.shopDomain || !creds.accessToken) {
+      console.log(`[TwoWay][Contact] Shopify credentials not configured (env token AND database OAuth token missing)`);
+      debug('twoway', 'contact-update: no credentials after env + DB fallback -> 500');
       return res.status(500).send('Shopify credentials not configured');
     }
 
     if (shopifyId) {
       console.log(`[TwoWay][Contact] Has Shopify ID ${shopifyId} — pushing update...`);
-      await shopifyService.updateCustomerByFields(shopifyId, contact, shopDomain, accessToken);
+      await shopifyService.updateCustomerByFields(shopifyId, contact, creds.shopDomain, creds.accessToken);
       console.log(`[TwoWay][Contact] SUCCESS — Pushed Bitrix contact ${contactId} -> Shopify customer ${shopifyId}`);
       return res.status(200).send('OK');
     }
@@ -73,17 +102,17 @@ router.post('/bitrix/contact-update', authorize, async (req, res) => {
     }
 
     console.log(`[TwoWay][Contact] No Shopify ID. Searching Shopify by email "${email}"...`);
-    const existingCustomer = await shopifyService.findShopifyCustomerByEmail(email, shopDomain, accessToken);
+    const existingCustomer = await shopifyService.findShopifyCustomerByEmail(email, creds.shopDomain, creds.accessToken);
     if (existingCustomer) {
       console.log(`[TwoWay][Contact] Found existing Shopify customer ${existingCustomer.id} — linking and pushing update...`);
       await bitrixService.updateContact(contactId, { UF_CRM_SHOPIFY_ID: String(existingCustomer.id) });
-      await shopifyService.updateCustomerByFields(existingCustomer.id, contact, shopDomain, accessToken);
+      await shopifyService.updateCustomerByFields(existingCustomer.id, contact, creds.shopDomain, creds.accessToken);
       console.log(`[TwoWay][Contact] SUCCESS — Linked existing Shopify customer ${existingCustomer.id} to Bitrix contact ${contactId}`);
       return res.status(200).send('OK');
     }
 
     console.log(`[TwoWay][Contact] Not found in Shopify. Creating new customer...`);
-    const newCustomer = await shopifyService.createShopifyCustomer(contact, shopDomain, accessToken);
+    const newCustomer = await shopifyService.createShopifyCustomer(contact, creds.shopDomain, creds.accessToken);
     if (newCustomer) {
       await bitrixService.updateContact(contactId, { UF_CRM_SHOPIFY_ID: String(newCustomer.id) });
       console.log(`[TwoWay][Contact] SUCCESS — Created new Shopify customer ${newCustomer.id} from Bitrix contact ${contactId}`);
@@ -125,9 +154,73 @@ router.post('/bitrix/deal-update', authorize, async (req, res) => {
 
     const shopifyOrderId = await getMappingWithFallback('deals_reverse', dealId);
     if (!shopifyOrderId) {
-      console.log(`[TwoWay][Deal] Deal ${dealId} has no Shopify order mapping (deals_reverse). This deal was created in Bitrix, not synced from Shopify. Shopify orders can only be created by customers at checkout — skipping push.`);
-      debug('twoway', `deal-update: deal ${dealId} NOT mapped to a Shopify order -> nothing to push (Bitrix cannot create Shopify orders)`);
-      return res.status(200).send('No Shopify order ID mapped for this deal — nothing to push');
+      if (process.env.BITRIX_ORDER_SYNC_ENABLED === 'false') {
+        console.log(`[TwoWay][Deal] Deal ${dealId} unmapped and BITRIX_ORDER_SYNC_ENABLED=false — skipping`);
+        return res.status(200).send('Order sync disabled');
+      }
+
+      console.log(`[TwoWay][Deal] Deal ${dealId} not mapped to a Shopify order — creating a Shopify DRAFT ORDER from this deal...`);
+      debug('twoway', `deal-update: deal ${dealId} unmapped -> draft-order creation path`);
+
+      const creds = await resolveShopifyCreds();
+      if (!creds.shopDomain || !creds.accessToken) {
+        console.log(`[TwoWay][Deal] Shopify credentials not configured`);
+        return res.status(500).send('Shopify credentials not configured');
+      }
+
+      let contact = null;
+      if (deal.CONTACT_ID) {
+        contact = await bitrixService.getContact(deal.CONTACT_ID);
+        debug('twoway', `deal-update: deal contact ${deal.CONTACT_ID} -> ${contact ? 'found' : 'not found'}`);
+      }
+      let customerRef = null;
+      if (contact) {
+        customerRef = await ensureShopifyCustomerForContact(contact, creds);
+        if (!customerRef) {
+          console.log(`[TwoWay][Deal] Contact ${deal.CONTACT_ID} has no email and no Shopify mapping — cannot attach customer to order`);
+        } else if (customerRef.linked && contact.ID) {
+          await bitrixService.updateContact(contact.ID, { UF_CRM_SHOPIFY_ID: String(customerRef.id) });
+          console.log(`[TwoWay][Deal] Linked existing Shopify customer ${customerRef.id} to Bitrix contact ${contact.ID}`);
+        }
+      }
+
+      const rows = await bitrixService.getDealProductRows(dealId);
+      let lineItems = rows.map((r) => ({
+        title: r.PRODUCT_NAME || 'Item',
+        price: parseFloat(r.PRICE || 0) || 0,
+        quantity: parseInt(r.QUANTITY, 10) || 1
+      }));
+      if (lineItems.length === 0) {
+        lineItems = [{ title: deal.TITLE || 'Bitrix Deal', price: parseFloat(deal.OPPORTUNITY || 0) || 0, quantity: 1 }];
+        debug('twoway', 'deal-update: no product rows on deal — using deal total as single line item');
+      }
+      debug('twoway', `deal-update: built line items`, { count: lineItems.length, items: lineItems.map((li) => `${li.quantity}x ${li.title}`) });
+
+      const draft = await shopifyService.createShopifyDraftOrder({
+        lineItems,
+        customerId: customerRef ? Number(customerRef.id) : null,
+        note: deal.COMMENTS || '',
+        email: contact && contact.EMAIL && contact.EMAIL[0] ? contact.EMAIL[0].VALUE : ''
+      }, creds.shopDomain, creds.accessToken);
+
+      if (!draft) {
+        return res.status(500).send('Failed to create Shopify draft order');
+      }
+
+      await setMapping('deals_reverse', String(dealId), String(draft.id));
+      console.log(`[TwoWay][Deal] SUCCESS — Created Shopify draft order ${draft.id} from deal ${dealId} (mapping saved)`);
+
+      if (process.env.BITRIX_DRAFT_ORDER_AUTOCOMPLETE === 'true') {
+        const completed = await shopifyService.completeShopifyDraftOrder(draft.id, creds.shopDomain, creds.accessToken);
+        if (completed && completed.order_id) {
+          await setMapping('deals_reverse', String(dealId), String(completed.order_id));
+          console.log(`[TwoWay][Deal] Auto-completed draft -> real Shopify order ${completed.order_id} (mapping updated)`);
+          return res.status(200).send('OK');
+        }
+        console.log(`[TwoWay][Deal] Auto-complete failed — draft order ${draft.id} remains in Shopify admin`);
+      }
+
+      return res.status(200).send('OK');
     }
 
     console.log(`[TwoWay][Deal] Mapped to Shopify order ${shopifyOrderId}`);
@@ -136,8 +229,8 @@ router.post('/bitrix/deal-update', authorize, async (req, res) => {
       fulfillment: deal.UF_CRM_FULFILLMENT_STATUS
     });
 
-    const { storeDomain: shopDomain, accessToken } = getTenantConfig();
-    if (!shopDomain || !accessToken) {
+    const creds = await resolveShopifyCreds();
+    if (!creds.shopDomain || !creds.accessToken) {
       console.log(`[TwoWay][Deal] Shopify credentials not configured`);
       return res.status(500).send('Shopify credentials not configured');
     }
@@ -165,7 +258,7 @@ router.post('/bitrix/deal-update', authorize, async (req, res) => {
     }
 
     console.log(`[TwoWay][Deal] Pushing to Shopify order ${shopifyOrderId}:`, updateFields);
-    await shopifyService.updateShopifyOrder(shopifyOrderId, updateFields, shopDomain, accessToken);
+    await shopifyService.updateShopifyOrder(shopifyOrderId, updateFields, creds.shopDomain, creds.accessToken);
     console.log(`[TwoWay][Deal] SUCCESS — Pushed Bitrix deal ${dealId} -> Shopify order ${shopifyOrderId}`);
     res.status(200).send('OK');
   } catch (err) {
@@ -202,8 +295,8 @@ router.post('/bitrix/product-update', authorize, async (req, res) => {
     const shopifyProductId = await getMappingWithFallback('products', product.PRODUCT_ID || productId);
     if (shopifyProductId) {
       debug('twoway', `product-update: mapped to Shopify product ${shopifyProductId} — pushing update`);
-      const { storeDomain: shopDomain, accessToken } = getTenantConfig();
-      if (!shopDomain || !accessToken) {
+      const creds = await resolveShopifyCreds();
+      if (!creds.shopDomain || !creds.accessToken) {
         console.log(`[TwoWay][Product] Shopify credentials not configured`);
         return res.status(500).send('Shopify credentials not configured');
       }
@@ -222,7 +315,7 @@ router.post('/bitrix/product-update', authorize, async (req, res) => {
       }
 
       console.log(`[TwoWay][Product] Pushing to Shopify product ${shopifyProductId}:`, Object.keys(updateFields));
-      await shopifyService.updateShopifyProduct(shopifyProductId, updateFields, shopDomain, accessToken);
+      await shopifyService.updateShopifyProduct(shopifyProductId, updateFields, creds.shopDomain, creds.accessToken);
       console.log(`[TwoWay][Product] SUCCESS — Pushed Bitrix product ${productId} -> Shopify product ${shopifyProductId}`);
       return res.status(200).send('OK');
     }
@@ -230,13 +323,13 @@ router.post('/bitrix/product-update', authorize, async (req, res) => {
     console.log(`[TwoWay][Product] Product ${productId} has no Shopify mapping. Attempting to create new product in Shopify...`);
     debug('twoway', `product-update: no mapping — creating NEW product in Shopify from Bitrix product ${productId}`);
 
-    const { storeDomain: shopDomain, accessToken } = getTenantConfig();
-    if (!shopDomain || !accessToken) {
+    const creds = await resolveShopifyCreds();
+    if (!creds.shopDomain || !creds.accessToken) {
       console.log(`[TwoWay][Product] Shopify credentials not configured`);
       return res.status(500).send('Shopify credentials not configured');
     }
 
-    const newProduct = await shopifyService.createShopifyProduct(product, shopDomain, accessToken);
+    const newProduct = await shopifyService.createShopifyProduct(product, creds.shopDomain, creds.accessToken);
     if (newProduct) {
       const { setMapping } = require('../utils/idMapStore');
       await setMapping('products', String(productId), String(newProduct.id));
@@ -273,8 +366,8 @@ router.post('/bitrix/inventory-update', authorize, async (req, res) => {
       return res.status(200).send('No Shopify product ID mapped');
     }
 
-    const { storeDomain: shopDomain, accessToken } = getTenantConfig();
-    if (!shopDomain || !accessToken) return res.status(500).send('Shopify credentials not configured');
+    const invCreds = await resolveShopifyCreds();
+    if (!invCreds.shopDomain || !invCreds.accessToken) return res.status(500).send('Shopify credentials not configured');
 
     let qty = quantity;
     if (qty === undefined && bId) {
@@ -295,7 +388,7 @@ router.post('/bitrix/inventory-update', authorize, async (req, res) => {
       return res.status(200).send('No Shopify location ID configured');
     }
 
-    await shopifyService.updateShopifyInventory(invItemId, locationId, qty, shopDomain, accessToken);
+    await shopifyService.updateShopifyInventory(invItemId, locationId, qty, invCreds.shopDomain, invCreds.accessToken);
     console.log(`[TwoWay] Pushed Bitrix inventory -> Shopify product ${shopifyPid}, qty=${qty}`);
     res.status(200).send('OK');
   } catch (err) {

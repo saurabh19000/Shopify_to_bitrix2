@@ -192,6 +192,7 @@ app.post('/webhooks/shopify/app-uninstalled', webhookHandler(async (payload, ctx
 
 // Global JSON parsing — applies to all routes BELOW this line
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 debug('app', 'Mounting routes: /migration (bulk import) + /sync (Bitrix->Shopify two-way)');
 app.use('/migration', migrationRoutes);

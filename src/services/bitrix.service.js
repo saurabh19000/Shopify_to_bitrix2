@@ -318,6 +318,13 @@ const getDeal = async (dealId) => {
   return data?.result || null;
 };
 
+const getDealProductRows = async (dealId) => {
+  const data = await bitrixRequest('crm.deal.productrows.get', { id: dealId });
+  const rows = data?.result || [];
+  debug('bitrix', `getDealProductRows: deal ${dealId} -> ${rows.length} row(s)`);
+  return rows;
+};
+
 const getProduct = async (bitrixProductId) => {
   const data = await bitrixRequest('crm.product.get', { id: bitrixProductId });
   debug('bitrix', `getProduct: ${bitrixProductId} -> ${data?.result ? `found "${data.result.NAME}"` : 'null'}`);
@@ -838,6 +845,7 @@ module.exports = {
   getContact,
   updateContact,
   getDeal,
+  getDealProductRows,
   getProduct,
   findProductByName,
   findProductById,
