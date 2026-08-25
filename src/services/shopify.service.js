@@ -461,14 +461,27 @@ const findShopifyCustomerByPhone = async (phone, shopDomain, accessToken) => {
   }
 };
 
+const extractFirstValue = (val) => {
+  if (!val) return '';
+  if (typeof val === 'string') return val.trim();
+  if (Array.isArray(val) && val.length > 0) {
+    const item = val[0];
+    return typeof item === 'string' ? item.trim() : (item?.VALUE || item?.value || '').trim();
+  }
+  if (typeof val === 'object') {
+    return (val.VALUE || val.value || '').trim();
+  }
+  return String(val).trim();
+};
+
 /**
  * Create a new Shopify customer from a Bitrix contact (used by two-way sync).
  */
 const createShopifyCustomer = async (contact, shopDomain, accessToken, syncId = '') => {
-  const email = contact.EMAIL && contact.EMAIL[0] ? contact.EMAIL[0].VALUE : '';
-  const phone = contact.PHONE && contact.PHONE[0] ? contact.PHONE[0].VALUE : '';
+  const email = extractFirstValue(contact.EMAIL);
+  const phone = extractFirstValue(contact.PHONE);
   if (!email && !phone) {
-    debug('shopify', 'createShopifyCustomer: contact has neither email nor phone — cannot create');
+    debug('shopify', 'createShopifyCustomer: contact has neither email nor phone — cannot create in Shopify');
     return null;
   }
 
@@ -523,6 +536,33 @@ const createShopifyCustomer = async (contact, shopDomain, accessToken, syncId = 
     });
     return response.data.customer;
   } catch (err) {
+    // If Shopify rejected the phone format but we have a valid email, retry without the phone
+    if (customer.phone && customer.email && err.response?.data?.errors?.phone) {
+      debug('shopify', 'createShopifyCustomer: phone rejected by Shopify — retrying with email only');
+      const fallbackCustomer = { ...customer };
+      delete fallbackCustomer.phone;
+      if (fallbackCustomer.addresses && fallbackCustomer.addresses[0]) {
+        fallbackCustomer.addresses = [{ ...fallbackCustomer.addresses[0] }];
+        delete fallbackCustomer.addresses[0].phone;
+      }
+      try {
+        const retryResponse = await axios.post(endpoint, { customer: fallbackCustomer }, { headers: getAuthHeaders(accessToken) });
+        const duration = Date.now() - startTime;
+        logShopifyResponse({
+          syncId,
+          entity: 'customer',
+          entityId: retryResponse.data.customer?.id,
+          statusCode: retryResponse.status,
+          status: 'SUCCESS',
+          response: retryResponse.data,
+          duration
+        });
+        return retryResponse.data.customer;
+      } catch (retryErr) {
+        // Continue to throw standard error below
+      }
+    }
+
     const duration = Date.now() - startTime;
     const statusCode = err.response?.status || 500;
     const responseBody = err.response?.data;

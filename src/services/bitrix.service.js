@@ -308,8 +308,17 @@ const getContact = async (contactId) => {
 
 const updateContact = async (contactId, fields) => {
   debug('bitrix', `updateContact: updating contact ${contactId}`, { fieldKeys: Object.keys(fields) });
-  await bitrixRequest('crm.contact.update', { id: contactId, fields });
-  return contactId;
+  try {
+    await bitrixRequest('crm.contact.update', { id: contactId, fields });
+    return contactId;
+  } catch (err) {
+    debug('bitrix', `updateContact: warning when updating contact ${contactId} (${err.message})`);
+    if (fields.UF_CRM_SHOPIFY_ID && Object.keys(fields).length === 1) {
+      console.warn(`[Bitrix] Warning: could not write UF_CRM_SHOPIFY_ID to contact ${contactId} in Bitrix (field may not exist in CRM settings). ID mapping is still saved in database.`);
+      return contactId;
+    }
+    throw err;
+  }
 };
 
 const getDeal = async (dealId) => {

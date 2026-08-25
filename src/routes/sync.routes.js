@@ -256,14 +256,32 @@ const contactUpdateHandler = async (req, res) => {
       }
 
       // Case C: Create brand new Shopify Customer
-      const newCustomer = await shopifyService.createShopifyCustomer(contact, creds.shopDomain, creds.accessToken, syncId);
-      if (newCustomer) {
-        await bitrixService.updateContact(contactId, { UF_CRM_SHOPIFY_ID: String(newCustomer.id) });
-        await setMapping('contacts', newCustomer.id, contactId);
-        recordSync('BITRIX_TO_SHOPIFY', 'contact', contactId);
-        logMappingSave({ syncId, entity: 'customer', bitrixId: contactId, shopifyId: newCustomer.id, status: 'SUCCESS' });
-        logSyncComplete({ syncId, entity: 'customer', bitrixId: contactId, shopifyId: newCustomer.id, duration: Date.now() - startedAt });
-        return res.status(200).send('OK');
+      try {
+        const newCustomer = await shopifyService.createShopifyCustomer(contact, creds.shopDomain, creds.accessToken, syncId);
+        if (newCustomer) {
+          await bitrixService.updateContact(contactId, { UF_CRM_SHOPIFY_ID: String(newCustomer.id) });
+          await setMapping('contacts', newCustomer.id, contactId);
+          recordSync('BITRIX_TO_SHOPIFY', 'contact', contactId);
+          logMappingSave({ syncId, entity: 'customer', bitrixId: contactId, shopifyId: newCustomer.id, status: 'SUCCESS' });
+          logSyncComplete({ syncId, entity: 'customer', bitrixId: contactId, shopifyId: newCustomer.id, duration: Date.now() - startedAt });
+          return res.status(200).send('OK');
+        }
+      } catch (createErr) {
+        if (createErr.status === 422 || createErr.duplicate) {
+          debug('twoway', 'contactUpdateHandler: customer creation 422 conflict — looking up existing customer in Shopify', { email, phone });
+          const existing = (email && (await shopifyService.findShopifyCustomerByEmail(email, creds.shopDomain, creds.accessToken))) ||
+                           (phone && (await shopifyService.findShopifyCustomerByPhone(phone, creds.shopDomain, creds.accessToken)));
+          if (existing) {
+            await bitrixService.updateContact(contactId, { UF_CRM_SHOPIFY_ID: String(existing.id) });
+            await shopifyService.updateCustomerByFields(existing.id, contact, creds.shopDomain, creds.accessToken, syncId);
+            await setMapping('contacts', existing.id, contactId);
+            recordSync('BITRIX_TO_SHOPIFY', 'contact', contactId);
+            logMappingSave({ syncId, entity: 'customer', bitrixId: contactId, shopifyId: existing.id, status: 'SUCCESS' });
+            logSyncComplete({ syncId, entity: 'customer', bitrixId: contactId, shopifyId: existing.id, duration: Date.now() - startedAt, message: 'Linked existing Shopify customer on 422 conflict' });
+            return res.status(200).send('OK');
+          }
+        }
+        throw createErr;
       }
 
       logSyncFailed({ syncId, entity: 'contact', bitrixId: contactId, error: 'Shopify customer creation returned empty response', stage: 'SHOPIFY_API' });
