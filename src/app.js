@@ -16,6 +16,7 @@ app.use((req, res, next) => {
 
 const { saveToken, getToken, deleteToken } = require('./utils/tokenStore');
 const { getMappingWithFallback, deleteMapping } = require('./utils/idMapStore');
+const { recordSync } = require('./utils/syncTracker');
 const bitrixService = require('./services/bitrix.service');
 const leadService = require('./services/lead.service');
 const invoiceService = require('./services/invoice.service');
@@ -73,11 +74,13 @@ const webhookHandler = (handler) => [
 // ---------------- CUSTOMERS ----------------
 
 app.post('/webhooks/shopify/customers-create', webhookHandler(async (customer, store) => {
-  await bitrixService.createOrUpdateContact(customer, store);
+  const contactId = await bitrixService.createOrUpdateContact(customer, store);
+  if (contactId) recordSync('SHOPIFY_TO_BITRIX', 'contact', contactId);
 }));
 
 app.post('/webhooks/shopify/customers-update', webhookHandler(async (customer, store) => {
-  await bitrixService.createOrUpdateContact(customer, store);
+  const contactId = await bitrixService.createOrUpdateContact(customer, store);
+  if (contactId) recordSync('SHOPIFY_TO_BITRIX', 'contact', contactId);
 }));
 
 app.post('/webhooks/shopify/customers-delete', webhookHandler(async ({ id }) => {
@@ -101,6 +104,7 @@ const handleProductWebhook = async (product, store) => {
     product, store.shopDomain, store.accessToken, store.apiVersion
   );
   if (bitrixProductId) {
+    recordSync('SHOPIFY_TO_BITRIX', 'product', bitrixProductId);
     const variant = (product.variants && product.variants[0]) || {};
     const qty = variant.inventory_quantity !== undefined ? Math.max(variant.inventory_quantity, 0) : 0;
     debug('app', `products webhook: product ${product.id} -> Bitrix ${bitrixProductId}; queueing stock sync in 3s with qty=${qty}`);
@@ -133,6 +137,7 @@ const handleOrderWebhook = async (order, store) => {
   const dealId = await bitrixService.createOrUpdateDeal(order, store);
 
   if (dealId) {
+    recordSync('SHOPIFY_TO_BITRIX', 'deal', dealId);
     debug('app', `orders webhook: deal ${dealId} ready — syncing invoice`);
     await invoiceService.syncInvoice(order, dealId, store);
 

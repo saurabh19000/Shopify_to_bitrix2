@@ -1,105 +1,11 @@
 const axios = require('axios');
 const config = require('../config/shopify.config');
-const { debug } = require('../utils/debugLogger');
+const { debug, logShopifyRequest, logShopifyResponse } = require('../utils/debugLogger');
 
 /**
  * Shopify Service
  * Purpose: Provides helper functions to interact with the Shopify Admin REST API.
  */
-
-/**
- * Checks for existing webhook subscriptions and registers them on Shopify if missing.
- * Subscribes to:
- * 1. customers/create -> /webhook/customer
- * 2. products/create  -> /webhook/product
- * 3. orders/create    -> /webhook/order
- * 
- * @returns {Promise<void>}
- */
-const registerWebhooks = async () => {
-  const { shopifyStoreUrl, shopifyAccessToken, shopifyApiVersion, baseWebhookUrl } = config;
-
-  // Gracefully handle missing/default config to prevent application startup crashes
-  if (!shopifyStoreUrl || shopifyStoreUrl.includes('your-store.myshopify.com')) {
-    console.warn('[Shopify Service] SHOPIFY_STORE_URL not configured. Skipping webhook registration.');
-    return;
-  }
-  if (!shopifyAccessToken || shopifyAccessToken.includes('shpat_your_access_token')) {
-    console.warn('[Shopify Service] SHOPIFY_ACCESS_TOKEN not configured. Skipping webhook registration.');
-    return;
-  }
-  if (!baseWebhookUrl || baseWebhookUrl.includes('your-ngrok-url')) {
-    console.warn('[Shopify Service] BASE_WEBHOOK_URL not configured. Skipping webhook registration.');
-    return;
-  }
-
-  console.log('[Shopify Service] Checking existing webhooks...');
-
-  try {
-    // 1. Fetch existing webhooks from Shopify
-    const response = await axios.get(
-      `https://${shopifyStoreUrl}/admin/api/${shopifyApiVersion}/webhooks.json`,
-      {
-        headers: {
-          'X-Shopify-Access-Token': shopifyAccessToken,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    const existingWebhooks = response.data.webhooks || [];
-    
-    // 2. Define the target webhooks we want registered
-    const targetWebhooks = [
-      { topic: 'customers/create', address: `${baseWebhookUrl}/webhook/customer` },
-      { topic: 'products/create', address: `${baseWebhookUrl}/webhook/product` },
-      { topic: 'orders/create', address: `${baseWebhookUrl}/webhook/order` }
-    ];
-
-    // 3. Register webhooks that do not already exist
-    for (const target of targetWebhooks) {
-      const exists = existingWebhooks.some(
-        (wh) => wh.topic === target.topic && wh.address === target.address
-      );
-
-      if (exists) {
-        console.log(`[Shopify Service] Webhook for "${target.topic}" at "${target.address}" is already registered.`);
-      } else {
-        console.log(`[Shopify Service] Registering webhook for "${target.topic}" at "${target.address}"...`);
-        
-        try {
-          await axios.post(
-            `https://${shopifyStoreUrl}/admin/api/${shopifyApiVersion}/webhooks.json`,
-            {
-              webhook: {
-                topic: target.topic,
-                address: target.address,
-                format: 'json'
-              }
-            },
-            {
-              headers: {
-                'X-Shopify-Access-Token': shopifyAccessToken,
-                'Content-Type': 'application/json'
-              }
-            }
-          );
-          console.log(`[Shopify Service] Successfully registered webhook for topic "${target.topic}".`);
-        } catch (postError) {
-          const apiError = postError.response && postError.response.data
-            ? JSON.stringify(postError.response.data)
-            : postError.message;
-          console.error(`[Shopify Service] Failed to register webhook for topic "${target.topic}":`, apiError);
-        }
-      }
-    }
-  } catch (error) {
-    const fetchError = error.response && error.response.data
-      ? JSON.stringify(error.response.data)
-      : error.message;
-    console.error('[Shopify Service] Error fetching existing Shopify webhooks:', fetchError);
-  }
-};
 
 const getNextPageUrl = (linkHeader) => {
   if (!linkHeader) return null;
@@ -121,11 +27,75 @@ const getAuthHeaders = (accessToken) => ({
 });
 
 /**
- * Push updated contact fields back to Shopify (Bitrix -> Shopify two-way sync).
- * Only fields the Shopify customers API accepts are sent.
+ * Checks for existing webhook subscriptions and registers them on Shopify if missing.
  */
-const updateShopifyCustomer = async (shopifyId, fields, shopDomain, accessToken) => {
-  // Only send non-empty values — sending "" would WIPE existing data on the customer.
+const registerWebhooks = async () => {
+  const { shopifyStoreUrl, shopifyAccessToken, shopifyApiVersion, baseWebhookUrl } = config;
+
+  if (!shopifyStoreUrl || shopifyStoreUrl.includes('your-store.myshopify.com')) {
+    console.warn('[Shopify Service] SHOPIFY_STORE_URL not configured. Skipping webhook registration.');
+    return;
+  }
+  if (!shopifyAccessToken || shopifyAccessToken.includes('shpat_your_access_token')) {
+    console.warn('[Shopify Service] SHOPIFY_ACCESS_TOKEN not configured. Skipping webhook registration.');
+    return;
+  }
+  if (!baseWebhookUrl || baseWebhookUrl.includes('your-ngrok-url')) {
+    console.warn('[Shopify Service] BASE_WEBHOOK_URL not configured. Skipping webhook registration.');
+    return;
+  }
+
+  console.log('[Shopify Service] Checking existing webhooks...');
+
+  try {
+    const response = await axios.get(
+      `https://${shopifyStoreUrl}/admin/api/${shopifyApiVersion}/webhooks.json`,
+      { headers: getAuthHeaders(shopifyAccessToken) }
+    );
+
+    const existingWebhooks = response.data.webhooks || [];
+    const targetWebhooks = [
+      { topic: 'customers/create', address: `${baseWebhookUrl}/webhook/customer` },
+      { topic: 'products/create', address: `${baseWebhookUrl}/webhook/product` },
+      { topic: 'orders/create', address: `${baseWebhookUrl}/webhook/order` }
+    ];
+
+    for (const target of targetWebhooks) {
+      const exists = existingWebhooks.some(
+        (wh) => wh.topic === target.topic && wh.address === target.address
+      );
+
+      if (exists) {
+        console.log(`[Shopify Service] Webhook for "${target.topic}" at "${target.address}" is already registered.`);
+      } else {
+        console.log(`[Shopify Service] Registering webhook for "${target.topic}" at "${target.address}"...`);
+        try {
+          await axios.post(
+            `https://${shopifyStoreUrl}/admin/api/${shopifyApiVersion}/webhooks.json`,
+            { webhook: { topic: target.topic, address: target.address, format: 'json' } },
+            { headers: getAuthHeaders(shopifyAccessToken) }
+          );
+          console.log(`[Shopify Service] Successfully registered webhook for topic "${target.topic}".`);
+        } catch (postError) {
+          const apiError = postError.response && postError.response.data
+            ? JSON.stringify(postError.response.data)
+            : postError.message;
+          console.error(`[Shopify Service] Failed to register webhook for topic "${target.topic}":`, apiError);
+        }
+      }
+    }
+  } catch (error) {
+    const fetchError = error.response && error.response.data
+      ? JSON.stringify(error.response.data)
+      : error.message;
+    console.error('[Shopify Service] Error fetching existing Shopify webhooks:', fetchError);
+  }
+};
+
+/**
+ * Push updated contact fields back to Shopify (Bitrix -> Shopify two-way sync).
+ */
+const updateShopifyCustomer = async (shopifyId, fields, shopDomain, accessToken, syncId = '') => {
   const setValue = (obj, key, value) => {
     if (value !== undefined && value !== null && String(value).trim() !== '') obj[key] = value;
   };
@@ -137,19 +107,59 @@ const updateShopifyCustomer = async (shopifyId, fields, shopDomain, accessToken)
   setValue(customer, 'tags', fields.tags);
   setValue(customer, 'note', fields.note);
 
+  if (fields.addresses && Array.isArray(fields.addresses) && fields.addresses.length > 0) {
+    customer.addresses = fields.addresses;
+  }
+
   if (Object.keys(customer).length === 0) {
     debug('shopify', `updateShopifyCustomer: nothing to send for customer ${shopifyId} — skipping`);
     return null;
   }
 
-  debug('shopify', `updateShopifyCustomer: PUT customers/${shopifyId}`, { sentFields: Object.keys(customer) });
-  const response = await axios.put(
-    `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/customers/${shopifyId}.json`,
-    { customer },
-    { headers: getAuthHeaders(accessToken) }
-  );
-  debug('shopify', `updateShopifyCustomer: OK — Shopify customer ${response.data.customer?.id} updated`);
-  return response.data.customer;
+  const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/customers/${shopifyId}.json`;
+  logShopifyRequest({
+    syncId,
+    entity: 'customer',
+    entityId: shopifyId,
+    operation: 'UPDATE',
+    endpoint,
+    method: 'PUT',
+    payload: { customer }
+  });
+
+  const startTime = Date.now();
+  try {
+    const response = await axios.put(endpoint, { customer }, { headers: getAuthHeaders(accessToken) });
+    const duration = Date.now() - startTime;
+    logShopifyResponse({
+      syncId,
+      entity: 'customer',
+      entityId: shopifyId,
+      statusCode: response.status,
+      status: 'SUCCESS',
+      response: response.data,
+      duration
+    });
+    return response.data.customer;
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    const statusCode = err.response?.status || 500;
+    const responseBody = err.response?.data;
+    logShopifyResponse({
+      syncId,
+      entity: 'customer',
+      entityId: shopifyId,
+      statusCode,
+      status: 'FAILED',
+      response: responseBody,
+      duration,
+      error: err.message
+    });
+    throw Object.assign(new Error(responseBody ? JSON.stringify(responseBody) : err.message), {
+      status: statusCode,
+      responseBody
+    });
+  }
 };
 
 /**
@@ -164,37 +174,49 @@ const getCustomerOrders = async (customerId, shopDomain, accessToken, maxPages =
     debug('shopify', `getCustomerOrders: fetching page ${pages + 1} for customer ${customerId}`);
     const response = await axios.get(url, { headers: getAuthHeaders(accessToken) });
     orders.push(...(response.data.orders || []));
-    debug('shopify', `getCustomerOrders: page ${pages + 1} returned ${((response.data || {}).orders || []).length} order(s), total so far=${orders.length}`);
     url = getNextPageUrl(response.headers.link);
     pages++;
   }
-  debug('shopify', `getCustomerOrders: DONE customer=${customerId} total orders=${orders.length} pages=${pages}`);
   return orders;
 };
 
 /**
- * Update a Shopify customer (generic wrapper used by two-way sync).
+ * Update a Shopify customer from Bitrix contact object.
  */
-const updateCustomerByFields = async (shopifyId, contact, shopDomain, accessToken) => {
-  debug('shopify', `updateCustomerByFields: preparing push for Shopify customer ${shopifyId} from Bitrix contact "${contact.NAME || ''}"`);
+const updateCustomerByFields = async (shopifyId, contact, shopDomain, accessToken, syncId = '') => {
   const email = contact.EMAIL && contact.EMAIL[0] ? contact.EMAIL[0].VALUE : '';
   const phone = contact.PHONE && contact.PHONE[0] ? contact.PHONE[0].VALUE : '';
+  
+  const addresses = [];
+  if (contact.ADDRESS || contact.ADDRESS_CITY || contact.ADDRESS_PROVINCE || contact.ADDRESS_COUNTRY) {
+    addresses.push({
+      address1: contact.ADDRESS || '',
+      city: contact.ADDRESS_CITY || '',
+      province: contact.ADDRESS_PROVINCE || '',
+      country: contact.ADDRESS_COUNTRY || '',
+      zip: contact.ADDRESS_POSTAL_CODE || '',
+      company: contact.COMPANY_TITLE || '',
+      first_name: contact.NAME || '',
+      last_name: contact.LAST_NAME || '',
+      phone: phone || ''
+    });
+  }
+
   return updateShopifyCustomer(shopifyId, {
     first_name: contact.NAME,
     last_name: contact.LAST_NAME,
     email,
     phone,
     tags: (contact.TAG && contact.TAG.length ? contact.TAG.join(', ') : '') || contact.UF_CRM_CUSTOMER_TAGS || '',
-    note: contact.UF_CRM_CUSTOMER_NOTE || ''
-  }, shopDomain, accessToken);
+    note: contact.UF_CRM_CUSTOMER_NOTE || '',
+    addresses: addresses.length > 0 ? addresses : undefined
+  }, shopDomain, accessToken, syncId);
 };
 
 /**
  * Push updated order fields from Bitrix deal back to Shopify.
- * Shopify Orders API only allows updating: note, tags, financial_status, fulfillment_status.
  */
-const updateShopifyOrder = async (shopifyOrderId, fields, shopDomain, accessToken) => {
-  debug('shopify', `updateShopifyOrder: PUT orders/${shopifyOrderId}`, { sentFields: fields });
+const updateShopifyOrder = async (shopifyOrderId, fields, shopDomain, accessToken, syncId = '') => {
   const order = {};
   if (fields.note !== undefined) order.note = fields.note || '';
   if (fields.tags !== undefined) order.tags = fields.tags || '';
@@ -206,20 +228,56 @@ const updateShopifyOrder = async (shopifyOrderId, fields, shopDomain, accessToke
     return null;
   }
 
-  const response = await axios.put(
-    `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/orders/${shopifyOrderId}.json`,
-    { order },
-    { headers: getAuthHeaders(accessToken) }
-  );
-  debug('shopify', `updateShopifyOrder: OK — Shopify order ${response.data.order?.id} updated`);
-  return response.data.order;
+  const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/orders/${shopifyOrderId}.json`;
+  logShopifyRequest({
+    syncId,
+    entity: 'order',
+    entityId: shopifyOrderId,
+    operation: 'UPDATE',
+    endpoint,
+    method: 'PUT',
+    payload: { order }
+  });
+
+  const startTime = Date.now();
+  try {
+    const response = await axios.put(endpoint, { order }, { headers: getAuthHeaders(accessToken) });
+    const duration = Date.now() - startTime;
+    logShopifyResponse({
+      syncId,
+      entity: 'order',
+      entityId: shopifyOrderId,
+      statusCode: response.status,
+      status: 'SUCCESS',
+      response: response.data,
+      duration
+    });
+    return response.data.order;
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    const statusCode = err.response?.status || 500;
+    const responseBody = err.response?.data;
+    logShopifyResponse({
+      syncId,
+      entity: 'order',
+      entityId: shopifyOrderId,
+      statusCode,
+      status: 'FAILED',
+      response: responseBody,
+      duration,
+      error: err.message
+    });
+    throw Object.assign(new Error(responseBody ? JSON.stringify(responseBody) : err.message), {
+      status: statusCode,
+      responseBody
+    });
+  }
 };
 
 /**
  * Push updated product fields from Bitrix product back to Shopify.
  */
-const updateShopifyProduct = async (shopifyProductId, fields, shopDomain, accessToken) => {
-  debug('shopify', `updateShopifyProduct: PUT products/${shopifyProductId}`, { sentFields: Object.keys(fields) });
+const updateShopifyProduct = async (shopifyProductId, fields, shopDomain, accessToken, syncId = '') => {
   const product = {};
   if (fields.title !== undefined) product.title = fields.title;
   if (fields.body_html !== undefined) product.body_html = fields.body_html || '';
@@ -230,8 +288,6 @@ const updateShopifyProduct = async (shopifyProductId, fields, shopDomain, access
 
   if (fields.variants && fields.variants.length > 0) {
     let variants = fields.variants;
-    // Sending variants WITHOUT ids makes Shopify DELETE the existing variants
-    // and create fresh ones — destroying SKU/barcode/inventory links.
     if (variants.some((v) => !v.id)) {
       try {
         const current = await axios.get(
@@ -239,7 +295,6 @@ const updateShopifyProduct = async (shopifyProductId, fields, shopDomain, access
           { headers: getAuthHeaders(accessToken) }
         );
         const existing = current.data?.product?.variants || [];
-        debug('shopify', `updateShopifyProduct: fetched ${existing.length} existing variant(s) to preserve their IDs`);
         variants = variants.map((v, i) => ({ ...(existing[i] ? { id: existing[i].id } : {}), ...v }));
       } catch (err) {
         debug('shopify', `updateShopifyProduct: could not fetch existing variants (${err.message}) — sending without IDs`);
@@ -250,6 +305,7 @@ const updateShopifyProduct = async (shopifyProductId, fields, shopDomain, access
       if (v.id) variant.id = v.id;
       if (v.price !== undefined) variant.price = v.price;
       if (v.sku !== undefined) variant.sku = v.sku;
+      if (v.barcode !== undefined) variant.barcode = v.barcode;
       if (v.inventory_quantity !== undefined) variant.inventory_quantity = v.inventory_quantity;
       if (v.weight !== undefined) variant.weight = v.weight;
       if (v.compare_at_price !== undefined) variant.compare_at_price = v.compare_at_price;
@@ -262,90 +318,153 @@ const updateShopifyProduct = async (shopifyProductId, fields, shopDomain, access
     return null;
   }
 
-  const response = await axios.put(
-    `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/products/${shopifyProductId}.json`,
-    { product },
-    { headers: getAuthHeaders(accessToken) }
-  );
-  debug('shopify', `updateShopifyProduct: OK — Shopify product ${response.data.product?.id} updated`);
-  return response.data.product;
+  const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/products/${shopifyProductId}.json`;
+  logShopifyRequest({
+    syncId,
+    entity: 'product',
+    entityId: shopifyProductId,
+    operation: 'UPDATE',
+    endpoint,
+    method: 'PUT',
+    payload: { product }
+  });
+
+  const startTime = Date.now();
+  try {
+    const response = await axios.put(endpoint, { product }, { headers: getAuthHeaders(accessToken) });
+    const duration = Date.now() - startTime;
+    logShopifyResponse({
+      syncId,
+      entity: 'product',
+      entityId: shopifyProductId,
+      statusCode: response.status,
+      status: 'SUCCESS',
+      response: response.data,
+      duration
+    });
+    return response.data.product;
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    const statusCode = err.response?.status || 500;
+    const responseBody = err.response?.data;
+    logShopifyResponse({
+      syncId,
+      entity: 'product',
+      entityId: shopifyProductId,
+      statusCode,
+      status: 'FAILED',
+      response: responseBody,
+      duration,
+      error: err.message
+    });
+    throw Object.assign(new Error(responseBody ? JSON.stringify(responseBody) : err.message), {
+      status: statusCode,
+      responseBody
+    });
+  }
 };
 
 /**
  * Update Shopify inventory level for a product variant.
- * Uses inventory_levels/set.json to set absolute quantity.
  */
-const updateShopifyInventory = async (inventoryItemId, locationId, quantity, shopDomain, accessToken) => {
-  debug('shopify', `updateShopifyInventory: setting qty=${quantity} (item=${inventoryItemId}, location=${locationId})`);
+const updateShopifyInventory = async (inventoryItemId, locationId, quantity, shopDomain, accessToken, syncId = '') => {
   if (!inventoryItemId || !locationId) {
     debug('shopify', `updateShopifyInventory: SKIPPED — missing inventory item or location ID`);
     return null;
   }
 
-  const response = await axios.post(
-    `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/inventory_levels/set.json`,
-    {
-      location_id: locationId,
-      inventory_item_id: inventoryItemId,
-      available: quantity
-    },
-    { headers: getAuthHeaders(accessToken) }
-  );
-  debug('shopify', `updateShopifyInventory: OK — inventory level set`);
-  return response.data.inventory_level;
+  const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/inventory_levels/set.json`;
+  const payload = {
+    location_id: locationId,
+    inventory_item_id: inventoryItemId,
+    available: quantity
+  };
+
+  logShopifyRequest({
+    syncId,
+    entity: 'inventory',
+    entityId: inventoryItemId,
+    operation: 'SET_LEVEL',
+    endpoint,
+    method: 'POST',
+    payload
+  });
+
+  const startTime = Date.now();
+  try {
+    const response = await axios.post(endpoint, payload, { headers: getAuthHeaders(accessToken) });
+    const duration = Date.now() - startTime;
+    logShopifyResponse({
+      syncId,
+      entity: 'inventory',
+      entityId: inventoryItemId,
+      statusCode: response.status,
+      status: 'SUCCESS',
+      response: response.data,
+      duration
+    });
+    return response.data.inventory_level;
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    const statusCode = err.response?.status || 500;
+    const responseBody = err.response?.data;
+    logShopifyResponse({
+      syncId,
+      entity: 'inventory',
+      entityId: inventoryItemId,
+      statusCode,
+      status: 'FAILED',
+      response: responseBody,
+      duration,
+      error: err.message
+    });
+    throw Object.assign(new Error(responseBody ? JSON.stringify(responseBody) : err.message), {
+      status: statusCode,
+      responseBody
+    });
+  }
 };
 
 /**
- * Find a Shopify customer by email (used by two-way sync to link new Bitrix contacts).
+ * Find a Shopify customer by email.
  */
 const findShopifyCustomerByEmail = async (email, shopDomain, accessToken) => {
-  if (!email) {
-    debug('shopify', 'findShopifyCustomerByEmail: no email -> null');
-    return null;
-  }
+  if (!email) return null;
   try {
-    debug('shopify', `findShopifyCustomerByEmail: searching "${email}"`);
     const response = await axios.get(
       `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/customers/search.json?query=email:${encodeURIComponent(email)}`,
       { headers: getAuthHeaders(accessToken) }
     );
     const customers = response.data.customers || [];
-    debug('shopify', `findShopifyCustomerByEmail: "${email}" -> ${customers.length > 0 ? `customer ${customers[0].id}` : 'NOT FOUND'}`);
     return customers.length > 0 ? customers[0] : null;
   } catch (err) {
     console.error('[Shopify] Failed to search customer by email:', err.message);
-    debug('shopify', `findShopifyCustomerByEmail: FAILED for "${email}"`, { error: err.message });
     return null;
   }
 };
 
 /**
- * Find a Shopify customer by phone number (fallback when a Bitrix contact
- * has no email — common for phone-first CRM records).
+ * Find a Shopify customer by phone number.
  */
 const findShopifyCustomerByPhone = async (phone, shopDomain, accessToken) => {
   if (!phone) return null;
   try {
-    debug('shopify', `findShopifyCustomerByPhone: searching "${phone}"`);
     const response = await axios.get(
       `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/customers/search.json?query=${encodeURIComponent(`phone:${phone}`)}`,
       { headers: getAuthHeaders(accessToken) }
     );
     const customers = response.data.customers || [];
-    debug('shopify', `findShopifyCustomerByPhone: "${phone}" -> ${customers.length > 0 ? `customer ${customers[0].id}` : 'NOT FOUND'}`);
     return customers.length > 0 ? customers[0] : null;
   } catch (err) {
     console.error('[Shopify] Failed to search customer by phone:', err.message);
-    debug('shopify', `findShopifyCustomerByPhone: FAILED for "${phone}"`, { error: err.message });
     return null;
   }
 };
 
 /**
  * Create a new Shopify customer from a Bitrix contact (used by two-way sync).
- * Email OR phone is enough — phone-only CRM contacts are supported.
  */
-const createShopifyCustomer = async (contact, shopDomain, accessToken) => {
+const createShopifyCustomer = async (contact, shopDomain, accessToken, syncId = '') => {
   const email = contact.EMAIL && contact.EMAIL[0] ? contact.EMAIL[0].VALUE : '';
   const phone = contact.PHONE && contact.PHONE[0] ? contact.PHONE[0].VALUE : '';
   if (!email && !phone) {
@@ -364,105 +483,249 @@ const createShopifyCustomer = async (contact, shopDomain, accessToken) => {
   if (tags) customer.tags = tags;
   if (contact.UF_CRM_CUSTOMER_NOTE) customer.note = contact.UF_CRM_CUSTOMER_NOTE;
 
+  if (contact.ADDRESS || contact.ADDRESS_CITY || contact.ADDRESS_PROVINCE || contact.ADDRESS_COUNTRY) {
+    customer.addresses = [{
+      address1: contact.ADDRESS || '',
+      city: contact.ADDRESS_CITY || '',
+      province: contact.ADDRESS_PROVINCE || '',
+      country: contact.ADDRESS_COUNTRY || '',
+      zip: contact.ADDRESS_POSTAL_CODE || '',
+      company: contact.COMPANY_TITLE || '',
+      first_name: contact.NAME || '',
+      last_name: contact.LAST_NAME || '',
+      phone: phone || ''
+    }];
+  }
+
+  const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/customers.json`;
+  logShopifyRequest({
+    syncId,
+    entity: 'customer',
+    entityId: contact.ID || 'NEW',
+    operation: 'CREATE',
+    endpoint,
+    method: 'POST',
+    payload: { customer }
+  });
+
+  const startTime = Date.now();
   try {
-    debug('shopify', `createShopifyCustomer: POST customers (email=${email || 'none'}, phone=${phone || 'none'})`);
-    const response = await axios.post(
-      `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/customers.json`,
-      { customer },
-      { headers: getAuthHeaders(accessToken) }
-    );
-    debug('shopify', `createShopifyCustomer: OK — created Shopify customer ${response.data.customer?.id}`);
+    const response = await axios.post(endpoint, { customer }, { headers: getAuthHeaders(accessToken) });
+    const duration = Date.now() - startTime;
+    logShopifyResponse({
+      syncId,
+      entity: 'customer',
+      entityId: response.data.customer?.id,
+      statusCode: response.status,
+      status: 'SUCCESS',
+      response: response.data,
+      duration
+    });
     return response.data.customer;
   } catch (err) {
-    // A duplicate (email/phone already taken) returns 422 — surface the body so
-    // we can fall back to linking instead of failing silently.
-    console.error('[Shopify] Failed to create customer:', err.response?.data ? JSON.stringify(err.response.data) : err.message);
-    debug('shopify', `createShopifyCustomer: FAILED`, { email, phone, error: err.message, responseBody: err.response?.data });
-    throw Object.assign(new Error(err.response?.data ? JSON.stringify(err.response.data) : err.message), { status: err.response?.status || 500, duplicate: err.response?.status === 422 });
+    const duration = Date.now() - startTime;
+    const statusCode = err.response?.status || 500;
+    const responseBody = err.response?.data;
+    logShopifyResponse({
+      syncId,
+      entity: 'customer',
+      entityId: contact.ID || 'NEW',
+      statusCode,
+      status: 'FAILED',
+      response: responseBody,
+      duration,
+      error: err.message
+    });
+    throw Object.assign(new Error(responseBody ? JSON.stringify(responseBody) : err.message), {
+      status: statusCode,
+      responseBody,
+      duplicate: statusCode === 422
+    });
   }
 };
 
 /**
  * Create a new Shopify product from a Bitrix product (used by two-way sync).
  */
-const createShopifyProduct = async (product, shopDomain, accessToken) => {
+const createShopifyProduct = async (product, shopDomain, accessToken, syncId = '') => {
   const title = product.NAME || 'Untitled Product';
   const price = parseFloat(product.PRICE || 0);
-  debug('shopify', `createShopifyProduct: POST products title="${title}" price=${price}`);
 
   const payload = {
     product: {
       title: title,
       body_html: product.DESCRIPTION || '',
       vendor: product.VENDOR || '',
-      status: product.ACTIVE === 'Y' ? 'active' : 'draft',
-      variants: [{ price: price, sku: product.CODE || '' }]
+      product_type: product.PRODUCT_TYPE || '',
+      tags: product.TAGS || '',
+      status: (product.ACTIVE === 'Y' || product.ACTIVE === true || product.ACTIVE === undefined) ? 'active' : 'draft',
+      variants: [{
+        price: price,
+        sku: product.CODE || '',
+        barcode: product.BARCODE || '',
+        inventory_quantity: product.QUANTITY !== undefined ? parseInt(product.QUANTITY, 10) : undefined
+      }]
     }
   };
 
+  const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/products.json`;
+  logShopifyRequest({
+    syncId,
+    entity: 'product',
+    entityId: product.ID || 'NEW',
+    operation: 'CREATE',
+    endpoint,
+    method: 'POST',
+    payload
+  });
+
+  const startTime = Date.now();
   try {
-    const response = await axios.post(
-      `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/products.json`,
-      payload,
-      { headers: getAuthHeaders(accessToken) }
-    );
-    console.log(`[Shopify] Created product "${title}" -> ID ${response.data.product?.id}`);
+    const response = await axios.post(endpoint, payload, { headers: getAuthHeaders(accessToken) });
+    const duration = Date.now() - startTime;
+    logShopifyResponse({
+      syncId,
+      entity: 'product',
+      entityId: response.data.product?.id,
+      statusCode: response.status,
+      status: 'SUCCESS',
+      response: response.data,
+      duration
+    });
     return response.data.product;
   } catch (err) {
-    console.error(`[Shopify] Failed to create product "${title}":`, err.message);
-    debug('shopify', `createShopifyProduct: FAILED for "${title}"`, { error: err.message, responseBody: err.response?.data });
-    return null;
+    const duration = Date.now() - startTime;
+    const statusCode = err.response?.status || 500;
+    const responseBody = err.response?.data;
+    logShopifyResponse({
+      syncId,
+      entity: 'product',
+      entityId: product.ID || 'NEW',
+      statusCode,
+      status: 'FAILED',
+      response: responseBody,
+      duration,
+      error: err.message
+    });
+    throw Object.assign(new Error(responseBody ? JSON.stringify(responseBody) : err.message), {
+      status: statusCode,
+      responseBody
+    });
   }
 };
 
 /**
  * Create a Shopify DRAFT ORDER from a Bitrix deal (used by two-way sync).
- * Draft orders are the supported way to push CRM-created orders into Shopify —
- * the merchant reviews them in Shopify admin and marks them as paid, or the
- * auto-complete flag turns them into real orders immediately.
  */
-const createShopifyDraftOrder = async ({ lineItems, customerId, note, email }, shopDomain, accessToken) => {
+const createShopifyDraftOrder = async (
+  { lineItems, customerId, note, email, shippingAddress, billingAddress, tags, discount, shippingLine },
+  shopDomain,
+  accessToken,
+  syncId = ''
+) => {
   const draftOrder = { line_items: lineItems };
   if (customerId) draftOrder.customer = { id: customerId };
   if (!customerId && email) draftOrder.email = email;
   if (note) draftOrder.note = note;
+  if (tags) draftOrder.tags = tags;
+  if (shippingAddress) draftOrder.shipping_address = shippingAddress;
+  if (billingAddress) draftOrder.billing_address = billingAddress;
+  if (shippingLine) draftOrder.shipping_line = shippingLine;
+  if (discount) draftOrder.applied_discount = discount;
 
+  const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/draft_orders.json`;
+  logShopifyRequest({
+    syncId,
+    entity: 'order',
+    entityId: 'NEW_DRAFT',
+    operation: 'CREATE',
+    endpoint,
+    method: 'POST',
+    payload: { draft_order: draftOrder }
+  });
+
+  const startTime = Date.now();
   try {
-    debug('shopify', `createShopifyDraftOrder: POST draft_orders (${lineItems.length} line item(s), customer=${customerId || 'none'})`, {
-      lineItems: lineItems.map((li) => `${li.quantity}x ${li.title} @ ${li.price}`)
+    const response = await axios.post(endpoint, { draft_order: draftOrder }, { headers: getAuthHeaders(accessToken) });
+    const duration = Date.now() - startTime;
+    logShopifyResponse({
+      syncId,
+      entity: 'order',
+      entityId: response.data.draft_order?.id,
+      statusCode: response.status,
+      status: 'SUCCESS',
+      response: response.data,
+      duration
     });
-    const response = await axios.post(
-      `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/draft_orders.json`,
-      { draft_order: draftOrder },
-      { headers: getAuthHeaders(accessToken) }
-    );
-    debug('shopify', `createShopifyDraftOrder: OK — draft order ${response.data.draft_order?.id} created`);
     return response.data.draft_order;
   } catch (err) {
-    console.error('[Shopify] Failed to create draft order:', err.response?.data ? JSON.stringify(err.response.data) : err.message);
-    debug('shopify', `createShopifyDraftOrder: FAILED`, { error: err.message, responseBody: err.response?.data });
-    return null;
+    const duration = Date.now() - startTime;
+    const statusCode = err.response?.status || 500;
+    const responseBody = err.response?.data;
+    logShopifyResponse({
+      syncId,
+      entity: 'order',
+      entityId: 'NEW_DRAFT',
+      statusCode,
+      status: 'FAILED',
+      response: responseBody,
+      duration,
+      error: err.message
+    });
+    throw Object.assign(new Error(responseBody ? JSON.stringify(responseBody) : err.message), {
+      status: statusCode,
+      responseBody
+    });
   }
 };
 
 /**
  * Complete a draft order — converts it into a REAL order in the store.
- * Returns the draft_order payload which contains order_id of the new order.
  */
-const completeShopifyDraftOrder = async (draftOrderId, shopDomain, accessToken) => {
+const completeShopifyDraftOrder = async (draftOrderId, shopDomain, accessToken, syncId = '') => {
+  const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/draft_orders/${draftOrderId}/complete.json`;
+  logShopifyRequest({
+    syncId,
+    entity: 'order',
+    entityId: draftOrderId,
+    operation: 'COMPLETE_DRAFT',
+    endpoint,
+    method: 'POST',
+    payload: {}
+  });
+
+  const startTime = Date.now();
   try {
-    debug('shopify', `completeShopifyDraftOrder: POST draft_orders/${draftOrderId}/complete`);
-    const response = await axios.post(
-      `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/draft_orders/${draftOrderId}/complete.json`,
-      {},
-      { headers: getAuthHeaders(accessToken) }
-    );
-    debug('shopify', `completeShopifyDraftOrder: OK — draft ${draftOrderId} -> order ${response.data.draft_order?.order_id}`);
+    const response = await axios.post(endpoint, {}, { headers: getAuthHeaders(accessToken) });
+    const duration = Date.now() - startTime;
+    logShopifyResponse({
+      syncId,
+      entity: 'order',
+      entityId: response.data.draft_order?.order_id || draftOrderId,
+      statusCode: response.status,
+      status: 'SUCCESS',
+      response: response.data,
+      duration
+    });
     return response.data.draft_order;
   } catch (err) {
-    console.error('[Shopify] Failed to complete draft order:', err.response?.data ? JSON.stringify(err.response.data) : err.message);
-    debug('shopify', `completeShopifyDraftOrder: FAILED for draft ${draftOrderId}`, { error: err.message });
-    return null;
+    const duration = Date.now() - startTime;
+    const statusCode = err.response?.status || 500;
+    const responseBody = err.response?.data;
+    logShopifyResponse({
+      syncId,
+      entity: 'order',
+      entityId: draftOrderId,
+      statusCode,
+      status: 'FAILED',
+      response: responseBody,
+      duration,
+      error: err.message
+    });
+    throw Object.assign(new Error(responseBody ? JSON.stringify(responseBody) : err.message), {
+      status: statusCode,
+      responseBody
+    });
   }
 };
 
@@ -481,3 +744,4 @@ module.exports = {
   createShopifyDraftOrder,
   completeShopifyDraftOrder
 };
+
