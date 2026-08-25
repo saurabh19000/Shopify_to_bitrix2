@@ -95,14 +95,27 @@ const extractBitrixEventData = (req, defaultEvent = 'BITRIX_EVENT') => {
   };
 };
 
+const extractFirstValue = (val) => {
+  if (!val) return '';
+  if (typeof val === 'string') return val.trim();
+  if (Array.isArray(val) && val.length > 0) {
+    const item = val[0];
+    return typeof item === 'string' ? item.trim() : (item?.VALUE || item?.value || '').trim();
+  }
+  if (typeof val === 'object') {
+    return (val.VALUE || val.value || '').trim();
+  }
+  return String(val).trim();
+};
+
 // Given a Bitrix contact object, find or create the matching Shopify customer.
 const ensureShopifyCustomerForContact = async (contact, creds, syncId) => {
   if (contact.UF_CRM_SHOPIFY_ID) {
     return { id: String(contact.UF_CRM_SHOPIFY_ID), linked: false };
   }
 
-  const email = contact.EMAIL && contact.EMAIL[0] ? contact.EMAIL[0].VALUE : '';
-  const phone = contact.PHONE && contact.PHONE[0] ? contact.PHONE[0].VALUE : '';
+  const email = extractFirstValue(contact.EMAIL);
+  const phone = extractFirstValue(contact.PHONE);
   if (!email && !phone) return null;
 
   let existing = null;
@@ -158,8 +171,8 @@ const contactUpdateHandler = async (req, res) => {
         return res.status(404).send(`Contact ${contactId} not found`);
       }
 
-      const email = contact.EMAIL && contact.EMAIL[0] ? contact.EMAIL[0].VALUE : '';
-      const phone = contact.PHONE && contact.PHONE[0] ? contact.PHONE[0].VALUE : '';
+      const email = extractFirstValue(contact.EMAIL);
+      const phone = extractFirstValue(contact.PHONE);
       const shopifyId = contact.UF_CRM_SHOPIFY_ID;
 
       // Stage 3: Data Validation
@@ -211,12 +224,20 @@ const contactUpdateHandler = async (req, res) => {
 
       // Case A: Bitrix contact already has Shopify Customer ID -> UPDATE
       if (shopifyId) {
-        await shopifyService.updateCustomerByFields(shopifyId, contact, creds.shopDomain, creds.accessToken, syncId);
-        await setMapping('contacts', shopifyId, contactId);
-        recordSync('BITRIX_TO_SHOPIFY', 'contact', contactId);
-        logMappingSave({ syncId, entity: 'customer', bitrixId: contactId, shopifyId, status: 'SUCCESS' });
-        logSyncComplete({ syncId, entity: 'customer', bitrixId: contactId, shopifyId, duration: Date.now() - startedAt });
-        return res.status(200).send('OK');
+        try {
+          await shopifyService.updateCustomerByFields(shopifyId, contact, creds.shopDomain, creds.accessToken, syncId);
+          await setMapping('contacts', shopifyId, contactId);
+          recordSync('BITRIX_TO_SHOPIFY', 'contact', contactId);
+          logMappingSave({ syncId, entity: 'customer', bitrixId: contactId, shopifyId, status: 'SUCCESS' });
+          logSyncComplete({ syncId, entity: 'customer', bitrixId: contactId, shopifyId, duration: Date.now() - startedAt });
+          return res.status(200).send('OK');
+        } catch (updateErr) {
+          if (updateErr.status === 404) {
+            debug('twoway', `contactUpdateHandler: Shopify customer ${shopifyId} returned 404 — falling back to search/create`);
+          } else {
+            throw updateErr;
+          }
+        }
       }
 
       // Case B: Search Shopify for existing customer by email / phone
@@ -545,10 +566,18 @@ const productUpdateHandler = async (req, res) => {
           shopifyPayload: updateFields
         });
 
-        await shopifyService.updateShopifyProduct(shopifyProductId, updateFields, creds.shopDomain, creds.accessToken, syncId);
-        recordSync('BITRIX_TO_SHOPIFY', 'product', productId);
-        logSyncComplete({ syncId, entity: 'product', bitrixId: productId, shopifyId: shopifyProductId, duration: Date.now() - startedAt });
-        return res.status(200).send('OK');
+        try {
+          await shopifyService.updateShopifyProduct(shopifyProductId, updateFields, creds.shopDomain, creds.accessToken, syncId);
+          recordSync('BITRIX_TO_SHOPIFY', 'product', productId);
+          logSyncComplete({ syncId, entity: 'product', bitrixId: productId, shopifyId: shopifyProductId, duration: Date.now() - startedAt });
+          return res.status(200).send('OK');
+        } catch (prodErr) {
+          if (prodErr.status === 404) {
+            debug('twoway', `productUpdateHandler: Shopify product ${shopifyProductId} returned 404 — falling back to create`);
+          } else {
+            throw prodErr;
+          }
+        }
       }
 
       // Case B: Unmapped Product -> CREATE NEW PRODUCT IN SHOPIFY
