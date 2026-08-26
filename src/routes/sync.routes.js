@@ -77,14 +77,26 @@ const extractBitrixEventData = (req, defaultEvent = 'BITRIX_EVENT') => {
   const body = req.body || {};
   const query = req.query || {};
   const event = (body.event || query.event || defaultEvent).toString().toUpperCase();
+  const fields = body.data?.FIELDS || body.FIELDS || {};
+  
   const id =
-    body.data?.FIELDS?.ID ||
+    fields.ID ||
+    fields.Id ||
+    fields.id ||
     body.data?.ID ||
-    body.FIELDS?.ID ||
+    body.data?.id ||
     body.id ||
     body.ID ||
+    (fields.ANCHOR_TYPE_ID === 'CONTACT' || fields.ANCHOR_TYPE_ID === '3' ? fields.ANCHOR_ID : null) ||
+    (fields.ENTITY_TYPE_ID === 'CONTACT' || fields.ENTITY_TYPE_ID === '3' ? fields.ENTITY_ID : null) ||
+    fields.ANCHOR_ID ||
+    fields.ENTITY_ID ||
     body['data[FIELDS][ID]'] ||
+    body['data[FIELDS][ANCHOR_ID]'] ||
+    body['data[FIELDS][ENTITY_ID]'] ||
     query['data[FIELDS][ID]'] ||
+    query['data[FIELDS][ANCHOR_ID]'] ||
+    query['data[FIELDS][ENTITY_ID]'] ||
     query.id ||
     query.ID;
 
@@ -654,8 +666,8 @@ router.post('/bitrix/event', authorize, async (req, res) => {
       debug('twoway', `event-dispatcher: received ${eventName}`, { id, body: req.body });
 
       if (!eventName || !id) {
-        logValidation({ syncId, entity: 'general', entityId: id || 'N/A', status: 'FAILED', missingFields: 'eventName_or_id' });
-        return res.status(400).send('Missing event name or entity ID');
+        logValidation({ syncId, entity: 'general', entityId: id || 'N/A', status: 'SKIPPED', missingFields: 'eventName_or_id', details: { eventName } });
+        return res.status(200).send(`Event ${eventName || 'UNKNOWN'} skipped (no entity ID)`);
       }
 
       if (eventName.endsWith('_DELETE') || eventName.includes('DELETE')) {
@@ -665,6 +677,15 @@ router.post('/bitrix/event', authorize, async (req, res) => {
 
       let kind = null;
       if (eventName.includes('CONTACT')) kind = 'contact';
+      else if (eventName.includes('ADDRESS') || eventName.includes('REQUISITE')) {
+        const fields = req.body?.data?.FIELDS || req.body?.FIELDS || {};
+        const anchorType = String(fields.ANCHOR_TYPE_ID || fields.ENTITY_TYPE_ID || '').toUpperCase();
+        if (anchorType === 'DEAL' || anchorType === '2' || anchorType === 'ORDER') {
+          kind = 'deal';
+        } else {
+          kind = 'contact';
+        }
+      }
       else if (eventName.includes('DEAL') || eventName.includes('ORDER')) kind = 'deal';
       else if (eventName.includes('PRODUCT')) kind = 'product';
 
