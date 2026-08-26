@@ -1,417 +1,477 @@
-# Shopify → Bitrix24 CRM Integration
+# Shopify ↔ Bitrix24 Bi-Directional CRM Integration
 
-Backend service that syncs Shopify customers, products (with images, variants, stock, and 25+ custom fields), and orders to Bitrix24 CRM in real-time via webhooks, with support for bulk historical data migration.
-
-**Full 360° customer profile** — in addition to basic sync it provides:
-- 🛒 Abandoned cart → automatic Bitrix **lead** creation
-- 🚀 Checkout started → lead creation
-- 📈 Customer lifetime metrics (total orders, total spend, AOV, last purchase)
-- 🎯 Marketing attribution (UTMs, source, campaign, landing/referring site)
-- 🏷️ Real customer tags + notes (dedicated fields)
-- 💳 Discount code & amount
-- 🧾 Invoice sync (number + PDF attachment)
-- 🔄 Refund & return status updates
-- 📎 Attachments on deals (invoice PDF, certificates, design files)
-- 🔁 Two-way customer sync (Bitrix → Shopify)
+An enterprise-grade, real-time bi-directional synchronization middleware connecting **Shopify e-commerce stores** and **Bitrix24 CRM**. It synchronizes customers, contacts, deals, orders, products, variants, inventory stock, invoices, marketing attribution, and leads with zero echo loops and automated conflict recovery.
 
 ---
 
-## Architecture Overview
-
-```
-Shopify Store  ──webhooks──▶  Express App  ──REST API──▶  Bitrix24 CRM
-                                  │                     (Products, Contacts,
-                            OAuth Flow                   Deals, Stock Docs)
-                                  │
-                      ┌───────────┴───────────┐
-                      │     PostgreSQL         │
-                      │  shop_tokens table     │
-                      │  id_map table          │
-                      └───────────────────────┘
-```
-
-**Two independent workflows:**
-1. **Product Sync** — Creates/updates products with images, prices, descriptions, and custom properties. Never touches inventory.
-2. **Inventory Sync** — Creates warehouse documents (receive/dispose) via `catalog.document.*` APIs. Never touches product data or images.
-
----
-
-## What's Synced
-
-### Customers
-| Shopify Field | Bitrix24 Field |
-|---|---|
-| first_name | NAME |
-| last_name | LAST_NAME |
-| email | EMAIL |
-| phone | PHONE |
-| default_address | ADDRESS, ADDRESS_CITY, ADDRESS_PROVINCE, ADDRESS_COUNTRY, ADDRESS_POSTAL_CODE |
-| company (from address) | COMPANY_TITLE |
-| tags | TAG (real Bitrix tags) |
-| note | UF_CRM_CUSTOMER_NOTE |
-| customer.id | UF_CRM_SHOPIFY_ID |
-| created_at | UF_CRM_CREATED_AT |
-| tags, note, created_at | COMMENTS |
-| lifetime metrics | UF_CRM_TOTAL_ORDERS, UF_CRM_TOTAL_SPEND, UF_CRM_LAST_PURCHASE, UF_CRM_AOV |
-| latest order attribution | UF_CRM_UTM_SOURCE, UF_CRM_UTM_MEDIUM, UF_CRM_UTM_CAMPAIGN, UF_CRM_LANDING_SITE, UF_CRM_REFERRING_SITE |
-
-### Abandoned Carts & Checkouts (Leads)
-| Shopify Event | Bitrix24 Action |
-|---|---|
-| carts/update (abandoned) | Creates/updates a **lead** "Abandoned Cart" with cart total, abandoned checkout URL, line items, UTMs, linked contact |
-| checkouts/create | Creates/updates a **lead** "Checkout Started" with totals, attribution, shipping info, linked contact |
-
-Lead dedupe is handled via `id_map` (`leads` / `checkouts` types) — no duplicate leads per cart/checkout.
-
-### Products (25+ fields)
-| Shopify Field | Bitrix24 Field | Property ID |
-|---|---|---|
-| title | NAME | — |
-| price | PRICE | — |
-| status (active/draft) | ACTIVE | — |
-| body_html | DESCRIPTION (HTML stripped, formatted) | — |
-| variant.sku | CODE | — |
-| product.id | Shopify Product ID | PROPERTY_98 |
-| vendor | Vendor | PROPERTY_110 |
-| product_type | Product Type | PROPERTY_112 |
-| tags | Tags | PROPERTY_114 |
-| handle | Handle | PROPERTY_116 |
-| variant.barcode | Barcode | PROPERTY_118 |
-| variant.compare_at_price | Compare At Price | PROPERTY_120 |
-| variant.inventory_quantity | Stock Quantity | PROPERTY_124 |
-| variant.weight + unit | Weight | PROPERTY_126 |
-| created_at | Shopify Created Date | PROPERTY_128 |
-| variant.taxable | Taxable (Yes/No) | PROPERTY_106 |
-| product handle URL | SEO URL | PROPERTY_108 |
-| variant.unit_price | Unit Price | PROPERTY_130 |
-| variant.inventory_management | Inventory Tracked (Physical/Virtual) | PROPERTY_132 |
-| variant.requires_shipping | Requires Shipping (Yes/No) | PROPERTY_134 |
-| product.title (SEO) | SEO Title | PROPERTY_136 |
-| variant options + count | Variant Info | PROPERTY_140 |
-| variant dimensions | Box Size (e.g. "10 x 8 x 5 cm") | PROPERTY_142 |
-| product.status | Status (Active/Draft/Inactive) | PROPERTY_144 |
-| variant.width | WIDTH | — |
-| variant.length | LENGTH | — |
-| variant.height | HEIGHT | — |
-| product.image.src | PREVIEW_PICTURE + DETAIL_PICTURE | — |
-| collections | Collections | PROPERTY_100 |
-| category (GraphQL) | Category | PROPERTY_102 |
-| cost per item | Cost Per Item | PROPERTY_104 |
-| metafields | Category Metafields | PROPERTY_138 |
-
-**Variant Info (PROPERTY_140) shows:**
-```
-2 variant(s) >> Color: Red, Blue | Size: S, M, L >> Red / S, Red / M, Blue / S, Blue / M
-```
-
-**Box Size (PROPERTY_142) shows:**
-```
-10 x 8 x 5 cm
-```
-
-### Orders/Deals
-| Shopify Field | Bitrix24 Field |
-|---|---|
-| order_number | TITLE ("Order #1234") |
-| total_price | OPPORTUNITY |
-| currency | CURRENCY_ID |
-| financial_status | STAGE_ID (paid→WON, pending→NEW, refunded→LOSE) |
-| financial_status | UF_CRM_FINANCIAL_STATUS |
-| fulfillment_status | UF_CRM_FULFILLMENT_STATUS |
-| source_name | UF_CRM_ORDER_CHANNEL |
-| shipping_lines[0].title | UF_CRM_DELIVERY_METHOD |
-| fulfillments[0].shipment_status | UF_CRM_DELIVERY_STATUS |
-| landing_site UTMs | UF_CRM_UTM_SOURCE, UF_CRM_UTM_MEDIUM, UF_CRM_UTM_CAMPAIGN, UF_CRM_UTM_TERM, UF_CRM_UTM_CONTENT |
-| landing_site / referring_site | UF_CRM_LANDING_SITE, UF_CRM_REFERRING_SITE |
-| discount_applications | UF_CRM_DISCOUNT_CODE, UF_CRM_DISCOUNT |
-| invoice (name + url) | UF_CRM_INVOICE_NUMBER, UF_CRM_INVOICE_URL |
-| refund state | UF_CRM_REFUND_STATUS, UF_CRM_REFUND_AMOUNT |
-| created_at | BEGINDATE |
-| closed_at | CLOSEDATE |
-| customer email | CONTACT_ID (auto-linked) |
-| line_items | Product Rows (name, price, qty) |
-| — | Timeline Comment ("Imported automatically from Shopify", only on creation) |
-
-### Invoices & Attachments
-- When `BITRIX_INVOICE_SYNC_ENABLED=true`, every order gets a Bitrix invoice (`crm.invoice.add`) with number, price, currency, dates, linked contact/deal. Deduped via `id_map` type `invoices`.
-- If Shopify exposes an invoice URL, the PDF is downloaded and attached to the deal timeline.
-- `attachFilesToDeal()` (src/services/invoice.service.js) is a reusable helper to attach any file (invoice PDF, certificates, design files) to a deal.
-
-### Inventory (Stock Sync)
-| Step | API Call | Purpose |
-|---|---|---|
-| 1 | `catalog.document.add` | Create inventory document (type S=receive, D=dispose) |
-| 2 | `catalog.document.element.add` | Add product line with quantity to document |
-| 3 | `catalog.document.conduct` | Process document — updates Available Stock |
-
-- Uses delta-based sync (tracks last synced quantity in `id_map` table)
-- Avoids duplicate documents by comparing Shopify qty vs last synced qty
-- Runs after product creation in migration (2.5s delay between products)
-- Runs on product webhooks (3s delay after product create/update)
+## Table of Contents
+1. [Architecture & System Overview](#architecture--system-overview)
+2. [Core Features & Functionalities](#core-features--functionalities)
+3. [Data Flow Diagrams](#data-flow-diagrams)
+   - [Shopify ➔ Bitrix24 Flow (Forward Sync)](#1-shopify--bitrix24-flow-forward-sync)
+   - [Bitrix24 ➔ Shopify Flow (Reverse Sync)](#2-bitrix24--shopify-flow-reverse-sync)
+4. [Supported Entities & Field Mappings](#supported-entities--field-mappings)
+   - [Customers & Contacts](#1-customers--contacts)
+   - [Deals & Orders](#2-deals--orders)
+   - [Products & Variants](#3-products--variants-25-fields)
+   - [Inventory Stock (Warehouse Documents)](#4-inventory-stock-warehouse-documents)
+   - [Abandoned Carts & Checkouts (Leads)](#5-abandoned-carts--checkouts-leads)
+5. [Resilience, Deduplication & Loop Prevention](#resilience-deduplication--loop-prevention)
+6. [Structured 8-Stage Logging & Traceability](#structured-8-stage-logging--traceability)
+7. [Database Schema (`shop_tokens` & `id_map`)](#database-schema)
+8. [API Endpoints & Webhooks](#api-endpoints--webhooks)
+9. [Environment Configuration (`.env`)](#environment-configuration)
+10. [Deployment & Production Commands](#deployment--production-commands)
+11. [Monitoring, Log Inspection & Testing](#monitoring-log-inspection--testing)
 
 ---
 
-## Webhooks (Real-Time Sync)
-
-| Shopify Event | Route | Bitrix24 Action |
-|---|---|---|
-| products/create | POST /webhooks/shopify/products-create | Create product + sync stock |
-| products/update | POST /webhooks/shopify/products-update | Update product + sync stock |
-| products/delete | POST /webhooks/shopify/products-delete | Delete product |
-| customers/create | POST /webhooks/shopify/customers-create | Create contact (+ lifetime metrics, attribution) |
-| customers/update | POST /webhooks/shopify/customers-update | Update contact (+ lifetime metrics, attribution) |
-| customers/delete | POST /webhooks/shopify/customers-delete | Delete contact |
-| orders/create | POST /webhooks/shopify/orders-create | Create deal + invoice + lifetime refresh |
-| orders/update | POST /webhooks/shopify/orders-updated | Update deal (refunds, fulfillment, status) + invoice + lifetime refresh |
-| orders/delete | POST /webhooks/shopify/orders-delete | Delete deal |
-| carts/update | POST /webhooks/shopify/carts-update | Abandoned cart → lead (create/update) |
-| checkouts/create | POST /webhooks/shopify/checkouts-create | Checkout started → lead |
-| refunds/create | POST /webhooks/shopify/refunds-create | Update deal refund status/amount + timeline comment |
-| app/uninstalled | POST /webhooks/shopify/app-uninstalled | Remove stored OAuth token |
-
-All webhook routes use `express.raw()` **and verify the Shopify HMAC signature** (`X-Shopify-Hmac-Sha256`) via `src/utils/webhook.middleware.js`.
-
----
-
-## Migration (Bulk Historical Import)
-
-| Endpoint | Description |
-|---|---|
-| POST /migration/customers | Paginate all Shopify customers → Bitrix24 contacts |
-| POST /migration/products | Paginate all Shopify products → Bitrix24 products + stock sync |
-| POST /migration/orders | Paginate all Shopify orders → Bitrix24 deals |
-| POST /migration/all | Run all three sequentially |
-
-Credentials come from the `.env` file (single tenant).
-
-Product migration runs in **two passes:**
-1. Create/update all products (images, properties, prices)
-2. Sync inventory stock via warehouse documents (2.5s delay between products)
-
----
-
-## Project Structure
+## Architecture & System Overview
 
 ```
-backend/
-├── src/
-│   ├── app.js                      # Express server, webhooks (HMAC-verified), OAuth, migration routes
-│   │
-│   ├── config/
-│   │   ├── db.config.js            # PostgreSQL connection pool (pg)
-│   │   ├── shopify.config.js       # Shopify store URL, API version, async token
-│   │   ├── bitrix.config.js        # Webhook URL, currency, warehouse, responsible ID, invoice/lead/two-way settings
-│   │   └── uf.config.js            # All Bitrix UF_CRM_* custom field definitions
-│   │
-│   ├── services/
-│   │   ├── bitrix.service.js       # Core: product/contact/deal/lead/invoice CRUD, stock sync, refunds, image upload
-│   │   ├── shopify.service.js      # Shopify REST helpers (webhook registration, customer update, order fetch)
-│   │   ├── migration.service.js    # Bulk import with pagination and two-pass product sync
-│   │   ├── attribution.service.js  # UTM / source / campaign extraction from orders
-│   │   ├── lifetime.service.js     # Customer lifetime metrics computation + refresh
-│   │   ├── lead.service.js         # Abandoned cart + checkout lead creation/dedupe
-│   │   └── invoice.service.js      # Bitrix invoice creation + PDF/attachment upload
-│   │
-│   ├── utils/
-│   │   ├── tokenStore.js           # PostgreSQL: saveToken / getToken / deleteToken
-│   │   ├── idMapStore.js           # PostgreSQL: setMapping / getMappingWithFallback / deleteMapping
-│   │   ├── tenantContext.js        # Single-tenant config resolver (reads .env)
-│   │   └── webhook.middleware.js   # Shopify HMAC signature verification
-│   │
-│   ├── routes/
-│   │   ├── migration.routes.js     # POST /migration/* endpoints
-│   │   └── sync.routes.js          # Two-way sync endpoints (Bitrix → Shopify)
-│   │
-│   ├── sync/                       # Legacy sync modules (not actively used)
-│   │   ├── syncCustomer.js
-│   │   └── syncProduct.js
-│   │
-│   └── controllers/                # Route controllers
-│       └── migration.controller.js
-│
-├── scripts/
-│   ├── migrateDb.js                # Creates the required DB tables (idempotent)
-│   ├── registerWebhooks.js         # Register all Shopify webhook topics (idempotent)
-│   ├── createCustomFields.js       # Create all Bitrix UF_CRM_* fields (idempotent, accepts --bitrix-url)
-│   ├── migrateToken.js             # Store SHOPIFY_ACCESS_TOKEN from .env into shop_tokens
-│   ├── syncBitrixToShopify.js      # Poll Bitrix contacts → push updates to Shopify
-│   └── wipeBitrixData.js           # Delete all Bitrix24 data (accepts --bitrix-url)
-│
-├── test/
-│   └── singleTenant.test.js        # .env config + no-duplicate sync test (dummy data, no external services)
-│
-├── .env.example                    # Environment variable template
-├── package.json
-└── README.md
+ ┌────────────────────────┐                               ┌────────────────────────┐
+ │      Shopify Store     │                               │      Bitrix24 CRM      │
+ │ (luksonjewel.myshopify)│                               │  (lukson.bitrix24.in)  │
+ └───────────┬────────────┘                               └───────────┬────────────┘
+             │                                                        │
+    HMAC Webhooks (13 topics)                                  Outbound Webhooks
+             │                                                        │
+             ▼                                                        ▼
+   ┌────────────────────────────────────────────────────────────────────────────┐
+   │                     Shopify-to-Bitrix Backend (Express)                    │
+   │                                                                            │
+   │   ┌────────────────────────┐          ┌────────────────────────────────┐   │
+   │   │ Inbound HMAC Validator │          │ Bitrix Event Dispatcher        │   │
+   │   │ (X-Shopify-Hmac-Sha256)│          │ (Contact, Requisite, Address,  │   │
+   │   └───────────┬────────────┘          │  Deal, Product handlers)       │   │
+   │               │                       └───────────────┬────────────────┘   │
+   │               ▼                                       ▼                    │
+   │   ┌────────────────────────────────────────────────────────────────────┐   │
+   │   │               Loop Prevention Engine (syncTracker.js)              │   │
+   │   │  • Bidirectional Echo Suppression (TTL: 45s)                       │   │
+   │   │  • In-flight Request Deduplication (TTL: 300ms)                    │   │
+   │   └─────────────────────────────────┬──────────────────────────────────┘   │
+   │                                     │                                      │
+   │   ┌─────────────────────────────────┴──────────────────────────────────┐   │
+   │   │                Business Logic & Transformation Services            │   │
+   │   │  • bitrix.service.js      • shopify.service.js                     │   │
+   │   │  • lifetime.service.js    • attribution.service.js                 │   │
+   │   │  • lead.service.js        • invoice.service.js                     │   │
+   │   └─────────────────────────────────┬──────────────────────────────────┘   │
+   └─────────────────────────────────────┼──────────────────────────────────────┘
+                                         │
+                                         ▼
+                           ┌───────────────────────────┐
+                           │    PostgreSQL Database    │
+                           │  • id_map table           │
+                           │  • shop_tokens table      │
+                           └───────────────────────────┘
 ```
 
 ---
 
-## Environment Variables
+## Core Features & Functionalities
 
-```env
-PORT=3001
+* **True Bi-Directional Synchronization**: Changes in Shopify update Bitrix24 immediately, and changes in Bitrix24 update Shopify instantly.
+* **360° Customer Profile**: Synchronizes Names, Emails, Phones, Addresses, Company titles, Tags, Notes, and computed Analytics.
+* **Customer Lifetime Metrics**: Automatically computes and updates Bitrix contact fields:
+  * Total Orders Count (`UF_CRM_TOTAL_ORDERS`)
+  * Total Lifetime Spend (`UF_CRM_TOTAL_SPEND`)
+  * Average Order Value (`UF_CRM_AOV`)
+  * Last Purchase Timestamp (`UF_CRM_LAST_PURCHASE`)
+* **Deal & Order Automation**:
+  * Shopify Orders create Bitrix Deals with product line rows, taxes, discounts, and payment status.
+  * Bitrix Deals create Shopify Draft Orders or update existing Order financial/fulfillment status.
+* **Marketing Attribution Engine**: Extracts and updates UTM parameters (`utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, `utm_content`), landing site, and referring site.
+* **Product Catalog Sync**: Syncs 25+ product fields, variants, barcodes, compare-at prices, weights, categories, and high-resolution images.
+* **Delta-Based Stock Management**: Generates Bitrix inventory management warehouse documents (`catalog.document.add` / `conduct`) to update available stock accurately without race conditions.
+* **Lead Generation from Abandoned Carts**: Converts abandoned checkouts and carts into Bitrix Leads with line item breakdown and recovery checkout links.
+* **Invoices & Attachments**: Automatically creates Bitrix Invoices and attaches order PDF summaries to the deal timeline.
+* **Echo Loop Prevention**: Memory-backed fingerprint and direction tracker prevents endless back-and-forth ping-pong sync cycles.
+* **Automated Conflict Recovery**: Automatically handles Shopify 422 errors (e.g. duplicate email, invalid domestic phone numbers) and 404 missing records.
 
-# Shopify OAuth App
-SHOPIFY_API_KEY=your_api_key
-SHOPIFY_API_SECRET=your_api_secret
-SHOPIFY_APP_URL=https://your-app.onrender.com
-SHOPIFY_SCOPES=read_customers,read_products,read_orders,read_fulfillments,read_inventory,read_checkouts
-SHOPIFY_API_VERSION=2024-10
-SHOPIFY_STORE_URL=your-store.myshopify.com
-SHOPIFY_ACCESS_TOKEN=shpat_xxx_from_your_custom_app
+---
 
-# PostgreSQL
-DATABASE_URL=postgresql://user:password@host:port/database?sslmode=require
+## Data Flow Diagrams
 
-# Bitrix24
-BITRIX_WEBHOOK_URL=https://your-domain.bitrix24.in/rest/1/your_webhook_secret/
-BITRIX_WAREHOUSE_ID=2
-BITRIX_RESPONSIBLE_ID=1
-BITRIX_CURRENCY=INR
-BITRIX_STORE_DOMAIN=your-store.myshopify.com
+### 1. Shopify ➔ Bitrix24 Flow (Forward Sync)
 
-# Customer lifetime metrics — true/false
-COMPUTE_LIFETIME=true
+```mermaid
+sequenceDiagram
+    autonumber
+    participant SHP as Shopify Store
+    participant APP as Backend Middleware
+    participant PG as PostgreSQL (id_map)
+    participant BTX as Bitrix24 CRM
 
-# Lead settings (abandoned cart / checkout)
-BITRIX_LEAD_RESPONSIBLE_ID=1
-BITRIX_ABANDONED_CART_STAGE=NEW
-BITRIX_CHECKOUT_STAGE=NEW
+    SHP->>APP: Webhook POST (e.g. customers/create, orders/create)
+    APP->>APP: Cryptographic HMAC Signature Verification (SHA256)
+    APP->>APP: Check Loop Prevention (isEchoLoop / isDuplicateEvent)
+    
+    alt Inbound Customer Sync
+        APP->>BTX: Check for existing Contact (by Shopify ID / Email / Phone)
+        alt Contact Exists
+            APP->>BTX: crm.contact.update (Update fields & address)
+        else New Contact
+            APP->>BTX: crm.contact.add (Create contact with address & phone)
+        end
+        APP->>SHP: Fetch Customer Order History (paged)
+        APP->>APP: Calculate Lifetime Metrics (Spend, Orders, AOV)
+        APP->>BTX: crm.contact.update (Write computed lifetime fields)
+        APP->>PG: Save mapping (Shopify ID <-> Bitrix Contact ID)
+    end
 
-# Invoice sync
-BITRIX_INVOICE_SYNC_ENABLED=true
-BITRIX_INVOICE_PAY_SYSTEM_ID=1
-BITRIX_INVOICE_STATUS_ID=1
+    alt Inbound Order Sync
+        APP->>BTX: crm.deal.add (Title, Opportunity, Financial Status, Contact ID)
+        APP->>BTX: crm.deal.productrows.set (Line items, quantities, prices)
+        APP->>BTX: crm.timeline.comment.add ("Imported from Shopify")
+        APP->>PG: Save mapping (Shopify Order ID <-> Bitrix Deal ID)
+    end
 
-# Two-way sync shared secret
-BITRIX_SYNC_TOKEN=your_shared_secret_for_two_way_sync
+    APP-->>SHP: 200 OK
 ```
+
+---
+
+### 2. Bitrix24 ➔ Shopify Flow (Reverse Sync)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant BTX as Bitrix24 Portal
+    participant APP as Backend Middleware
+    participant PG as PostgreSQL (id_map)
+    participant SHP as Shopify Store
+
+    BTX->>APP: Outbound Webhook POST /sync/bitrix/event?token=***
+    APP->>APP: Authorize Bearer/Query Sync Token
+    APP->>APP: extractBitrixEventData (Extracts ID from FIELDS.ID, ANCHOR_ID, or ENTITY_ID)
+    APP->>APP: Check Loop Prevention (Suppress echo events within 45s)
+
+    alt Contact Event (ONCRMCONTACTADD, ONCRMCONTACTUPDATE, ONCRMADDRESSREGISTER)
+        APP->>BTX: crm.contact.get (Fetch full contact profile)
+        APP->>PG: Check for existing Shopify mapping
+        alt Has Mapping / UF_CRM_SHOPIFY_ID
+            APP->>SHP: PUT /admin/api/2026-07/customers/{id}.json
+        else Search by Email/Phone
+            APP->>SHP: GET /admin/api/2026-07/customers/search.json
+            alt Found Existing in Shopify
+                APP->>SHP: PUT /admin/api/2026-07/customers/{id}.json
+            else New Customer
+                APP->>SHP: POST /admin/api/2026-07/customers.json
+                alt 422 Conflict (e.g. Phone invalid or Email exists)
+                    APP->>APP: Auto-retry without invalid phone or link existing email
+                end
+            end
+        end
+        APP->>BTX: crm.contact.update (Write back UF_CRM_SHOPIFY_ID)
+        APP->>PG: Save bi-directional mapping (id_map)
+    end
+
+    alt Deal Event (ONCRMDEALADD, ONCRMDEALUPDATE)
+        APP->>BTX: crm.deal.get + crm.deal.productrows.get
+        alt Deal Create
+            APP->>SHP: POST /admin/api/2026-07/draft_orders.json
+        else Deal Update
+            APP->>SHP: PUT /admin/api/2026-07/orders/{id}.json (financial/fulfillment status)
+        end
+    end
+
+    alt Product Event (ONCRMPRODUCTADD, ONCRMPRODUCTUPDATE)
+        APP->>BTX: crm.product.get
+        APP->>SHP: GET /admin/api/2026-07/products/{id}.json (Fetch existing Variant IDs)
+        APP->>SHP: PUT /admin/api/2026-07/products/{id}.json (Preserve Variant IDs)
+    end
+
+    APP-->>BTX: 200 OK
+```
+
+---
+
+## Supported Entities & Field Mappings
+
+### 1. Customers & Contacts
+| Direction | Shopify Field | Bitrix24 Field | Purpose / Notes |
+| :--- | :--- | :--- | :--- |
+| `↔` | `first_name` | `NAME` | First Name |
+| `↔` | `last_name` | `LAST_NAME` | Last Name |
+| `↔` | `email` | `EMAIL` | Work Email (multi-value supported) |
+| `↔` | `phone` | `PHONE` | Work Phone (E.164 auto-fallback) |
+| `↔` | `default_address.address1` | `ADDRESS` | Street address |
+| `↔` | `default_address.city` | `ADDRESS_CITY` | City |
+| `↔` | `default_address.province`| `ADDRESS_PROVINCE` | State / Province |
+| `↔` | `default_address.country` | `ADDRESS_COUNTRY` | Country |
+| `↔` | `default_address.zip` | `ADDRESS_POSTAL_CODE` | Postal / Zip Code |
+| `↔` | `tags` | `TAG` / `UF_CRM_CUSTOMER_TAGS` | Customer tags |
+| `↔` | `note` | `UF_CRM_CUSTOMER_NOTE` | Customer notes |
+| `➔` | `id` | `UF_CRM_SHOPIFY_ID` | Linked Shopify Customer ID |
+| `➔` | Calculated Spend | `UF_CRM_TOTAL_SPEND` | Lifetime spend amount |
+| `➔` | Calculated Orders | `UF_CRM_TOTAL_ORDERS` | Total order count |
+| `➔` | Calculated AOV | `UF_CRM_AOV` | Average order value |
+| `➔` | Last Order Date | `UF_CRM_LAST_PURCHASE` | Last purchase date |
+| `➔` | UTM Source | `UF_CRM_UTM_SOURCE` | Marketing attribution |
+| `➔` | UTM Campaign | `UF_CRM_UTM_CAMPAIGN` | Marketing campaign |
+
+### 2. Deals & Orders
+| Direction | Shopify Field | Bitrix24 Field | Notes |
+| :--- | :--- | :--- | :--- |
+| `↔` | `name` (`#1001`) | `TITLE` | "Order #1001" |
+| `↔` | `total_price` | `OPPORTUNITY` | Total deal amount |
+| `↔` | `currency` | `CURRENCY_ID` | E.g. `INR`, `USD` |
+| `↔` | `financial_status` | `STAGE_ID` / `UF_CRM_FINANCIAL_STATUS` | `paid` ➔ `WON`, `pending` ➔ `NEW`, `refunded` ➔ `LOSE` |
+| `↔` | `fulfillment_status` | `UF_CRM_FULFILLMENT_STATUS` | `fulfilled`, `unfulfilled`, `partial` |
+| `➔` | `line_items` | Product Rows (`crm.deal.productrows.set`) | Name, Price, Quantity |
+| `➔` | `discount_codes` | `UF_CRM_DISCOUNT_CODE` | Applied coupon codes |
+| `➔` | `total_discounts` | `UF_CRM_DISCOUNT` | Total discount amount |
+| `➔` | `source_name` | `UF_CRM_ORDER_CHANNEL` | E.g. `web`, `shopify_draft_order` |
+| `➔` | Order Timeline | `crm.timeline.comment.add` | Automatically records import notes |
+
+### 3. Products & Variants (25+ Fields)
+| Shopify Field | Bitrix24 Field / Property | Description |
+| :--- | :--- | :--- |
+| `title` | `NAME` | Product Title |
+| `variants[0].price` | `PRICE` | Product Price |
+| `status` | `ACTIVE` (`Y`/`N`) | Active/Draft status |
+| `body_html` | `DESCRIPTION` (`DESCRIPTION_TYPE: text`) | Stripped & clean formatted text |
+| `variants[0].sku` | `CODE` | SKU identifier |
+| `images` | `PREVIEW_PICTURE` & `DETAIL_PICTURE` | Base64 high-res image upload |
+| `vendor` | `PROPERTY_110` (Vendor) | Brand / Vendor |
+| `product_type` | `PROPERTY_112` (Product Type) | Type classification |
+| `tags` | `PROPERTY_114` (Tags) | Comma-separated tags |
+| `handle` | `PROPERTY_116` (Handle) | Shopify URL slug |
+| `variants[0].barcode` | `PROPERTY_118` (Barcode) | Barcode / UPC |
+| `compare_at_price` | `PROPERTY_120` (Compare At Price) | Original MSRP price |
+| `inventory_quantity` | `PROPERTY_124` (Stock Quantity) | Current quantity |
+| `weight + unit` | `PROPERTY_126` (Weight) | Weight with unit |
+
+### 4. Inventory Stock (Warehouse Documents)
+Instead of overwriting inventory records, stock is managed via Bitrix24 official warehouse documents:
+1. `catalog.document.add`: Creates inventory document (`type: S` for receiving stock, `type: D` for stock write-off).
+2. `catalog.document.element.add`: Attaches product ID, target warehouse ID (`BITRIX_WAREHOUSE_ID`), and delta amount.
+3. `catalog.document.conduct`: Processes the document into Bitrix Available Stock.
+4. Delta is tracked in PostgreSQL `id_map` under type `stock` to prevent redundant document creation.
+
+### 5. Abandoned Carts & Checkouts (Leads)
+* **`carts/update`** & **`checkouts/create`**: Automatically create a Lead in Bitrix24 with total value, line items, contact binding, and the customer's direct checkout recovery URL.
+* Deduped via `id_map` under types `leads` and `checkouts`.
+
+---
+
+## Resilience, Deduplication & Loop Prevention
+
+### 1. Echo Loop Suppression (`syncTracker.js`)
+* Every outbound sync operation records a cryptographic key in memory: `${direction}:${entity}:${id}` with a 45-second TTL.
+* When the opposite platform sends a webhook for that same entity within 45 seconds, the middleware identifies it as an echo loop, acknowledges it with `200 OK`, and skips execution.
+
+### 2. Multi-Stage Contact Deduplication
+When creating or updating contacts, the engine resolves records in order:
+1. Exact ID mapping lookup via PostgreSQL `id_map`.
+2. Bitrix custom field lookup (`UF_CRM_SHOPIFY_ID`).
+3. Email matching (`crm.contact.list` filter `EMAIL`).
+4. Phone matching (`crm.contact.list` filter `PHONE`).
+
+### 3. Shopify 422 & 404 Auto-Recovery
+* **Phone Format Fallback**: If Shopify rejects a phone number format with `422 Unprocessable Entity`, the customer creation is automatically retried with email-only.
+* **Duplicate Email Fallback**: If Shopify rejects customer creation because the email exists, the customer is looked up via Shopify Search API, mapped, and updated.
+* **404 Missing Record Recovery**: If a mapped customer or product was deleted in Shopify, the sync automatically recreates the entity and updates the ID mapping.
+* **Non-Fatal Bitrix Custom Fields**: If a Bitrix portal is missing `UF_CRM_SHOPIFY_ID` in CRM settings, the system logs a non-fatal warning and persists the mapping in PostgreSQL.
+
+---
+
+## Structured 8-Stage Logging & Traceability
+
+Every transaction generates a unique Correlation ID:
+`[syncId=BTX-SHP-YYYYMMDD-XXXXX]` (Bitrix ➔ Shopify) or `[syncId=SHP-BTX-YYYYMMDD-XXXXX]` (Shopify ➔ Bitrix).
+
+Each operation logs all 8 lifecycle stages:
+
+```text
+[INFO]  [syncId=BTX-SHP-20260826-00010-ABCD] [stage=BITRIX_EVENT] Bitrix event received: event=ONCRMCONTACTADD entity_id=8570
+[DEBUG] [syncId=BTX-SHP-20260826-00010-ABCD] [stage=BITRIX_PAYLOAD] Bitrix payload received for contact 8570
+[INFO]  [syncId=BTX-SHP-20260826-00010-ABCD] [stage=VALIDATION] Validation SUCCESS for contact 8570 (required: id, name, email/phone)
+[INFO]  [syncId=BTX-SHP-20260826-00010-ABCD] [stage=MAPPING] Field mapping SUCCESS: BITRIX -> SHOPIFY (customer)
+[INFO]  [syncId=BTX-SHP-20260826-00010-ABCD] [stage=SHOPIFY_API_REQUEST] Calling Shopify API: operation=CREATE method=POST endpoint=https://...
+[INFO]  [syncId=BTX-SHP-20260826-00010-ABCD] [stage=SHOPIFY_API_RESPONSE] Shopify API responded: statusCode=201 status=SUCCESS (duration=184ms)
+[INFO]  [syncId=BTX-SHP-20260826-00010-ABCD] [stage=MAPPING_SAVE] Bi-directional ID mapping saved: Bitrix 8570 <-> Shopify 9289514385648
+[INFO]  [syncId=BTX-SHP-20260826-00010-ABCD] [stage=SYNC_COMPLETE] Synchronization completed successfully (duration=412ms)
+```
+
+> **Security**: All API keys, bearer tokens, and webhook secrets are automatically masked (`***`) in logs.
 
 ---
 
 ## Database Schema
 
 ```sql
--- OAuth access token for the store
-CREATE TABLE shop_tokens (
+-- OAuth access token storage
+CREATE TABLE IF NOT EXISTS shop_tokens (
   shop VARCHAR(255) PRIMARY KEY,
   access_token TEXT NOT NULL
 );
 
--- Shopify ID → Bitrix24 ID mappings (also tracks stock sync state)
-CREATE TABLE id_map (
+-- Bi-directional mapping storage
+CREATE TABLE IF NOT EXISTS id_map (
   shop VARCHAR(255) NOT NULL DEFAULT '',
   type VARCHAR(50) NOT NULL,
   shopify_id VARCHAR(255) NOT NULL,
   bitrix_id VARCHAR(255) NOT NULL,
   PRIMARY KEY (shop, type, shopify_id)
 );
+
+-- Index for reverse lookups
+CREATE INDEX IF NOT EXISTS idx_id_map_reverse ON id_map (shop, type, bitrix_id);
 ```
 
-These tables are created automatically by `node scripts/migrateDb.js`.
-
-**id_map types:**
-- `contacts` — Shopify customer ID → Bitrix24 contact ID
-- `products` — Shopify product ID → Bitrix24 product ID
-- `deals` — Shopify order ID → Bitrix24 deal ID
-- `stock` — Shopify product ID → last synced quantity (for delta calculation)
-- `leads` — Shopify cart ID → Bitrix24 lead ID (abandoned carts)
-- `checkouts` — Shopify checkout ID → Bitrix24 lead ID
-- `invoices` — Shopify order ID → Bitrix24 invoice ID
+**Mapping Types in `id_map`:**
+* `contacts`: Shopify Customer ID `↔` Bitrix Contact ID
+* `deals`: Shopify Order ID `↔` Bitrix Deal ID
+* `products`: Shopify Product ID `↔` Bitrix Product ID
+* `stock`: Shopify Product ID `↔` Last Synced Stock Quantity
+* `leads`: Shopify Cart ID `↔` Bitrix Lead ID
+* `checkouts`: Shopify Checkout ID `↔` Bitrix Lead ID
+* `invoices`: Shopify Order ID `↔` Bitrix Invoice ID
 
 ---
 
-## Setup & Running
+## API Endpoints & Webhooks
 
-### 1. Postgres database
+### Inbound Shopify Webhooks (HMAC Verified)
+* `POST /webhooks/shopify/customers-create` — Customer Created
+* `POST /webhooks/shopify/customers-update` — Customer Updated
+* `POST /webhooks/shopify/customers-delete` — Customer Deleted
+* `POST /webhooks/shopify/orders-create` — Order Created
+* `POST /webhooks/shopify/orders-updated` — Order Updated / Paid / Fulfilled
+* `POST /webhooks/shopify/orders-delete` — Order Deleted
+* `POST /webhooks/shopify/products-create` — Product Created + Stock Sync
+* `POST /webhooks/shopify/products-update` — Product Updated + Stock Sync
+* `POST /webhooks/shopify/products-delete` — Product Deleted
+* `POST /webhooks/shopify/carts-update` — Abandoned Cart ➔ Lead
+* `POST /webhooks/shopify/checkouts-create` — Checkout Started ➔ Lead
+* `POST /webhooks/shopify/refunds-create` — Order Refunded
+* `POST /webhooks/shopify/app-uninstalled` — App Uninstalled Cleanup
 
-**Local Postgres** (free, no cloud needed):
-- Install PostgreSQL from https://www.postgresql.org (or use Docker: `docker run -d --name pg -e POSTGRES_PASSWORD=yourpassword -p 5432:5432 postgres`)
-- Create the database:
-  ```bash
-  createdb -U postgres shopify_bitrix
-  ```
-- Set in `.env`:
-  ```
-  DATABASE_URL=postgres://postgres:yourpassword@localhost:5432/shopify_bitrix
-  ```
+### Inbound Bitrix24 Webhooks (`/sync/*`)
+* `POST /sync/bitrix/event?token={TOKEN}` — **Unified Event Dispatcher** (handles `ONCRMCONTACTADD`, `ONCRMCONTACTUPDATE`, `ONCRMADDRESSREGISTER`, `ONCRMREQUISITEADD`, `ONCRMDEALADD`, `ONCRMDEALUPDATE`, `ONCRMPRODUCTADD`, `ONCRMPRODUCTUPDATE`)
+* `POST /sync/bitrix/contact-update?token={TOKEN}` — Contact Update Handler
+* `POST /sync/bitrix/deal-update?token={TOKEN}` — Deal Update Handler
+* `POST /sync/bitrix/product-update?token={TOKEN}` — Product Update Handler
+* `POST /sync/bitrix/inventory-update?token={TOKEN}` — Stock Inventory Update Handler
 
-**External/cloud Postgres** (e.g. Render, Neon): just paste the connection string and keep `?sslmode=require` — SSL is enabled automatically for remote hosts.
-
-The app auto-detects SSL: `localhost`/`127.0.0.1` → no SSL; remote hosts → SSL. You can force either way with `?sslmode=disable` or `?sslmode=require`.
-
-### 2. Install + run
-
-```bash
-cd backend
-npm install
-cp .env.example .env   # fill in your credentials
-node scripts/migrateDb.js   # creates the DB tables (run once)
-npm start
-```
-
-### Store the Shopify token
-If you use a Shopify **custom app** (recommended for testing), store its Admin API access token so the scripts and OAuth flow can read it:
-```bash
-node scripts/migrateToken.js   # reads SHOPIFY_ACCESS_TOKEN from .env -> shop_tokens
-```
-
-### Register Webhooks
-```bash
-node scripts/registerWebhooks.js
-```
-This registers **13 topics** idempotently (create/update/delete for customers, products, orders, plus carts/update, checkouts/create, refunds/create, app/uninstalled).
-
-### Create Bitrix Custom Fields (one-time, idempotent)
-```bash
-node scripts/createCustomFields.js                      # default portal (.env)
-node scripts/createCustomFields.js --bitrix-url https://store.bitrix24.in/rest/1/xxx/   # another portal
-```
-Creates all `UF_CRM_*` fields used for lifetime metrics, attribution, notes, invoices, refunds, and lead data. Safe to re-run — existing fields are skipped.
-
-### Two-Way Sync (Bitrix → Shopify)
-1. In Bitrix24: **Settings → Integrations → Webhooks → Add webhook → Outgoing**, select event `Contact: updated`, and set the handler URL:
-   `https://{SHOPIFY_APP_URL}/sync/bitrix/contact-update?token={BITRIX_SYNC_TOKEN}`
-2. Alternatively run the poller on a schedule:
-   ```bash
-   node scripts/syncBitrixToShopify.js "2026-08-01T00:00:00"
-   ```
-   Pushes Bitrix contact name/email/phone/tags/note back to the matching Shopify customer (matched via `UF_CRM_SHOPIFY_ID`).
-
-### Run Migration
-```bash
-curl -X POST "http://localhost:3001/migration/all"
-```
-Order migration also backfills customer lifetime metrics (deduped, one refresh per customer).
+### Bulk Migration Endpoints
+* `POST /migration/all` — Sequentially migrates Customers, Products (with stock), and Orders
+* `POST /migration/customers` — Bulk imports all Shopify customers into Bitrix24 contacts
+* `POST /migration/products` — Bulk imports all Shopify products + stock documents
+* `POST /migration/orders` — Bulk imports all Shopify orders into Bitrix24 deals
 
 ---
 
-## Key Design Decisions
+## Environment Configuration
 
-### Why two workflows for products?
-Product images disappear if `crm.product.update` is called without `PREVIEW_PICTURE`/`DETAIL_PICTURE` fields. By separating product sync (which always includes images) from inventory sync (which only uses `catalog.document.*` APIs), images are never accidentally cleared.
+Create a `.env` file in the root directory:
 
-### Why delta-based stock tracking?
-`catalog.store.product.list` is not available on this Bitrix24 portal. Instead of querying current stock, the system tracks `lastSyncedQty` in the `id_map` table and calculates the delta for each sync. This is idempotent — running migration twice won't create duplicate stock documents.
+```env
+PORT=3001
+NODE_ENV=production
 
-### Why `DESCRIPTION_TYPE: "text"`?
-Bitrix24 stores descriptions as HTML by default. Plain text newlines don't render as line breaks in the UI. Setting `DESCRIPTION_TYPE: "text"` ensures formatted descriptions with bullet points and paragraphs display correctly.
+# Shopify Store & API Configuration
+SHOPIFY_STORE_URL=luksonjewel.myshopify.com
+SHOPIFY_ACCESS_TOKEN=shpat_xxxxxxxxxxxxxxxxxxxxxxxx
+SHOPIFY_API_VERSION=2026-07
+SHOPIFY_API_KEY=your_shopify_app_api_key
+SHOPIFY_API_SECRET=your_shopify_app_api_secret
+SHOPIFY_APP_URL=https://shopify.averlonworld.org
 
-### Image upload strategy
-Product images are uploaded as base64 to both `PREVIEW_PICTURE` and `DETAIL_PICTURE` fields simultaneously, ensuring the image appears in both list view and detail view in Bitrix24.
+# PostgreSQL Connection
+DATABASE_URL=postgresql://user:password@localhost:5432/shopify_bitrix?sslmode=disable
+
+# Bitrix24 Portal Configuration
+BITRIX_WEBHOOK_URL=https://lukson.bitrix24.in/rest/1/your_bitrix_inbound_token/
+BITRIX_WAREHOUSE_ID=2
+BITRIX_RESPONSIBLE_ID=1
+BITRIX_CURRENCY=INR
+BITRIX_STORE_DOMAIN=luksonjewel.myshopify.com
+
+# Two-Way Sync Authentication Secret
+BITRIX_SYNC_TOKEN=my_super_secret_abc123
+
+# Features & Analytics
+COMPUTE_LIFETIME=true
+BITRIX_ORDER_SYNC_ENABLED=true
+BITRIX_INVOICE_SYNC_ENABLED=true
+BITRIX_INVOICE_PAY_SYSTEM_ID=1
+BITRIX_INVOICE_STATUS_ID=1
+BITRIX_LEAD_RESPONSIBLE_ID=1
+```
 
 ---
 
-## Bitrix24 Portal Compatibility
+## Deployment & Production Commands
 
-This integration works with Bitrix24 Cloud portals that support:
-- `crm.product.*` (CRUD)
-- `crm.contact.*` (CRUD)
-- `crm.deal.*` (CRUD)
-- `catalog.document.*` (inventory management)
-- `catalog.store.list` (warehouse listing)
+### 1. Push Code from Local PC
+```bash
+git push origin development
+```
 
-**Not supported on this portal:**
-- `catalog.store.product.list` (stock query) — delta tracking used instead
-- `catalog.document.get` (document status check) — conduct result checked directly
+### 2. Deploy on Linux Server (`root@averlon1`)
+```bash
+cd ~/Shopify_to_bitrix2
+git checkout development
+git pull origin development
+docker compose down
+docker compose up -d --build
+```
+
+### 3. Initialize Database & Custom Fields (One-time setup)
+```bash
+# Run database migrations
+docker exec -i shopify-backend node scripts/migrateDb.js
+
+# Store token in database
+docker exec -i shopify-backend node scripts/migrateToken.js
+
+# Register custom fields in Bitrix CRM
+docker exec -i shopify-backend node scripts/createCustomFields.js
+
+# Register all 13 Shopify webhook topics
+docker exec -i shopify-backend node scripts/registerWebhooks.js
+```
+
+---
+
+## Monitoring, Log Inspection & Testing
+
+### 1. View Live Successful Syncs
+```bash
+docker compose logs -f app | grep --line-buffered -E "SYNC_COMPLETE|SUCCESS|createContact: DONE|createDeal: DONE"
+```
+
+### 2. View Live Errors & Exceptions
+```bash
+docker compose logs -f app | grep --line-buffered -E "ERROR|WARN|FAILED|EXCEPTION|401|422|500"
+```
+
+### 3. Trace a Transaction by Sync ID
+```bash
+docker compose logs app | grep "BTX-SHP-20260826-00010-ABCD"
+```
+
+### 4. Trigger a Test Sync for any Contact
+```bash
+docker exec -i shopify-backend node -e "
+const axios = require('axios');
+axios.post('http://localhost:3001/sync/bitrix/event?token=my_super_secret_abc123', {
+  event: 'ONCRMCONTACTADD',
+  data: { FIELDS: { ID: 'YOUR_BITRIX_CONTACT_ID' } }
+}).then(r => console.log('RESPONSE:', r.status, r.data))
+  .catch(e => console.error('ERROR:', e.message, e.response ? e.response.data : ''));
+"
+```
+
+### 5. Run Automated Test Suites (47 / 47 Tests)
+```bash
+# Run the complete test suite
+node test/verifyBitrixAddressAndContactEvents.test.js
+node test/twoWaySyncComprehensive.test.js
+node test/reverseSync.test.js
+node test/singleTenant.test.js
+```
