@@ -184,8 +184,8 @@ const getCustomerOrders = async (customerId, shopDomain, accessToken, maxPages =
  * Update a Shopify customer from Bitrix contact object.
  */
 const updateCustomerByFields = async (shopifyId, contact, shopDomain, accessToken, syncId = '') => {
-  const email = contact.EMAIL && contact.EMAIL[0] ? contact.EMAIL[0].VALUE : '';
-  const phone = contact.PHONE && contact.PHONE[0] ? contact.PHONE[0].VALUE : '';
+  const email = extractFirstValue(contact.EMAIL);
+  const phone = extractFirstValue(contact.PHONE);
   
   const addresses = [];
   if (contact.ADDRESS || contact.ADDRESS_CITY || contact.ADDRESS_PROVINCE || contact.ADDRESS_COUNTRY) {

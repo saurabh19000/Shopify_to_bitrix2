@@ -79,26 +79,34 @@ const extractBitrixEventData = (req, defaultEvent = 'BITRIX_EVENT') => {
   const event = (body.event || query.event || defaultEvent).toString().toUpperCase();
   const fields = body.data?.FIELDS || body.FIELDS || {};
   
-  const id =
-    fields.ID ||
-    fields.Id ||
-    fields.id ||
-    body.data?.ID ||
-    body.data?.id ||
-    body.id ||
-    body.ID ||
-    (fields.ANCHOR_TYPE_ID === 'CONTACT' || fields.ANCHOR_TYPE_ID === '3' ? fields.ANCHOR_ID : null) ||
-    (fields.ENTITY_TYPE_ID === 'CONTACT' || fields.ENTITY_TYPE_ID === '3' ? fields.ENTITY_ID : null) ||
-    fields.ANCHOR_ID ||
-    fields.ENTITY_ID ||
-    body['data[FIELDS][ID]'] ||
-    body['data[FIELDS][ANCHOR_ID]'] ||
-    body['data[FIELDS][ENTITY_ID]'] ||
-    query['data[FIELDS][ID]'] ||
-    query['data[FIELDS][ANCHOR_ID]'] ||
-    query['data[FIELDS][ENTITY_ID]'] ||
-    query.id ||
-    query.ID;
+  let id = null;
+  if (event.includes('ADDRESS') || event.includes('REQUISITE')) {
+    id =
+      (fields.ANCHOR_TYPE_ID === 'CONTACT' || fields.ANCHOR_TYPE_ID === '3' || fields.ENTITY_TYPE_ID === 'CONTACT' || fields.ENTITY_TYPE_ID === '3')
+        ? (fields.ANCHOR_ID || fields.ENTITY_ID)
+        : (fields.ANCHOR_ID || fields.ENTITY_ID || fields.ID);
+  }
+
+  if (!id) {
+    id =
+      fields.ID ||
+      fields.Id ||
+      fields.id ||
+      body.data?.ID ||
+      body.data?.id ||
+      body.id ||
+      body.ID ||
+      fields.ANCHOR_ID ||
+      fields.ENTITY_ID ||
+      body['data[FIELDS][ID]'] ||
+      body['data[FIELDS][ANCHOR_ID]'] ||
+      body['data[FIELDS][ENTITY_ID]'] ||
+      query['data[FIELDS][ID]'] ||
+      query['data[FIELDS][ANCHOR_ID]'] ||
+      query['data[FIELDS][ENTITY_ID]'] ||
+      query.id ||
+      query.ID;
+  }
 
   return {
     event: event || defaultEvent,
