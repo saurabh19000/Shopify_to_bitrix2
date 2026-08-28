@@ -106,5 +106,7 @@ module.exports = {
   recordSync,
   isEchoLoop,
   isDuplicateEvent,
-  hashPayload
+  hashPayload,
+  TTL_MS,
+  EVENT_DEDUP_MS
 };

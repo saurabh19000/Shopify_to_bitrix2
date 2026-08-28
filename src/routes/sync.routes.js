@@ -4,7 +4,7 @@ const bitrixService = require('../services/bitrix.service');
 const shopifyService = require('../services/shopify.service');
 const config = require('../config/bitrix.config');
 const { getTenantConfig } = require('../utils/tenantContext');
-const { getMappingWithFallback, setMapping } = require('../utils/idMapStore');
+const { getMappingWithFallback, setMapping, getShopifyIdByBitrixId } = require('../utils/idMapStore');
 const { getToken } = require('../utils/tokenStore');
 const {
   debug,
@@ -35,19 +35,26 @@ const authorize = (req, res, next) => {
     req.body?.token ||
     req.body?.auth?.application_token;
 
+  const webhookSecret = (process.env.BITRIX_WEBHOOK_URL || '').split('/rest/1/')[1]?.replace(/\/.*$/, '') || '';
+
+  const isAuthorized =
+    Boolean(token && config.syncToken && token === config.syncToken) ||
+    Boolean(token && webhookSecret && token === webhookSecret) ||
+    Boolean(req.body?.auth?.domain && (process.env.BITRIX_WEBHOOK_URL || '').includes(req.body.auth.domain));
+
   debug('twoway', `${req.method} ${req.path} auth check`, {
     tokenProvided: Boolean(token),
-    tokenMatches: Boolean(token && config.syncToken && token === config.syncToken),
+    tokenMatches: isAuthorized,
     syncTokenConfigured: Boolean(config.syncToken)
   });
 
-  if (!config.syncToken) {
+  if (!config.syncToken && !webhookSecret) {
     console.error('[TwoWay][Auth] BITRIX_SYNC_TOKEN is not configured in .env');
     return res.status(500).send('BITRIX_SYNC_TOKEN not configured');
   }
 
-  if (token !== config.syncToken) {
-    console.warn(`[TwoWay][Auth] Unauthorized request to ${req.path} (token mismatch)`);
+  if (!isAuthorized) {
+    console.warn(`[TwoWay][Auth] Unauthorized request to ${req.path} (received token: "${token || 'NONE'}", expected: "${config.syncToken}")`);
     return res.status(401).send('Unauthorized');
   }
 
@@ -193,19 +200,32 @@ const contactUpdateHandler = async (req, res) => {
 
       const email = extractFirstValue(contact.EMAIL);
       const phone = extractFirstValue(contact.PHONE);
-      const shopifyId = contact.UF_CRM_SHOPIFY_ID;
+      let shopifyId = contact.UF_CRM_SHOPIFY_ID;
 
-      // Stage 3: Data Validation
-      if (!email && !phone && !shopifyId) {
+      // If UF_CRM_SHOPIFY_ID is not present on the Bitrix record, check the database mapping
+      if (!shopifyId) {
+        shopifyId = await getShopifyIdByBitrixId('contacts', contactId);
+        if (shopifyId) {
+          debug('twoway', `contactUpdateHandler: resolved shopifyId=${shopifyId} from id_map for contact ${contactId}`);
+        }
+      }
+
+      const hasName = Boolean((contact.NAME || '').trim() || (contact.LAST_NAME || '').trim());
+      const hasEmail = Boolean(email);
+      const hasPhone = Boolean(phone);
+      const hasNote = Boolean((contact.UF_CRM_CUSTOMER_NOTE || contact.COMMENTS || '').trim());
+
+      // Stage 3: Data Validation - allow name, email, phone, note or existing shopify ID
+      if (!hasEmail && !hasPhone && !shopifyId && !hasName && !hasNote && !contact.COMPANY_TITLE) {
         logValidation({
           syncId,
           entity: 'contact',
           entityId: contactId,
           status: 'FAILED',
-          missingFields: 'email_or_phone_or_shopifyId',
+          missingFields: 'name_or_email_or_phone_or_shopifyId',
           details: { name: `${contact.NAME || ''} ${contact.LAST_NAME || ''}`.trim() }
         });
-        return res.status(200).send('No UF_CRM_SHOPIFY_ID, no email and no phone — nothing to push');
+        return res.status(200).send('Contact has no name, email, phone or shopify ID — nothing to push');
       }
 
       logValidation({
@@ -213,8 +233,8 @@ const contactUpdateHandler = async (req, res) => {
         entity: 'contact',
         entityId: contactId,
         status: 'SUCCESS',
-        requiredFields: 'id, name, email/phone',
-        details: { hasEmail: Boolean(email), hasPhone: Boolean(phone), hasShopifyId: Boolean(shopifyId) }
+        requiredFields: 'id, name or email/phone',
+        details: { hasName, hasEmail, hasPhone, hasShopifyId: Boolean(shopifyId) }
       });
 
       // Resolve Shopify Credentials
@@ -266,6 +286,7 @@ const contactUpdateHandler = async (req, res) => {
       if (!existingCustomer && phone) existingCustomer = await shopifyService.findShopifyCustomerByPhone(phone, creds.shopDomain, creds.accessToken);
 
       if (existingCustomer) {
+        recordSync('SHOPIFY_TO_BITRIX', 'contact', contactId);
         await bitrixService.updateContact(contactId, { UF_CRM_SHOPIFY_ID: String(existingCustomer.id) });
         await shopifyService.updateCustomerByFields(existingCustomer.id, contact, creds.shopDomain, creds.accessToken, syncId);
         await setMapping('contacts', existingCustomer.id, contactId);
@@ -279,6 +300,7 @@ const contactUpdateHandler = async (req, res) => {
       try {
         const newCustomer = await shopifyService.createShopifyCustomer(contact, creds.shopDomain, creds.accessToken, syncId);
         if (newCustomer) {
+          recordSync('SHOPIFY_TO_BITRIX', 'contact', contactId);
           await bitrixService.updateContact(contactId, { UF_CRM_SHOPIFY_ID: String(newCustomer.id) });
           await setMapping('contacts', newCustomer.id, contactId);
           recordSync('BITRIX_TO_SHOPIFY', 'contact', contactId);
@@ -292,6 +314,7 @@ const contactUpdateHandler = async (req, res) => {
           const existing = (email && (await shopifyService.findShopifyCustomerByEmail(email, creds.shopDomain, creds.accessToken))) ||
                            (phone && (await shopifyService.findShopifyCustomerByPhone(phone, creds.shopDomain, creds.accessToken)));
           if (existing) {
+            recordSync('SHOPIFY_TO_BITRIX', 'contact', contactId);
             await bitrixService.updateContact(contactId, { UF_CRM_SHOPIFY_ID: String(existing.id) });
             await shopifyService.updateCustomerByFields(existing.id, contact, creds.shopDomain, creds.accessToken, syncId);
             await setMapping('contacts', existing.id, contactId);
@@ -373,7 +396,13 @@ const dealUpdateHandler = async (req, res) => {
       }
 
       // Check if this deal was already mapped to a Shopify order
-      const shopifyOrderId = await getMappingWithFallback('deals_reverse', dealId);
+      let shopifyOrderId = await getMappingWithFallback('deals_reverse', dealId);
+      if (!shopifyOrderId) {
+        shopifyOrderId = await getShopifyIdByBitrixId('deals', dealId);
+        if (shopifyOrderId) {
+          debug('twoway', `dealUpdateHandler: resolved shopifyOrderId=${shopifyOrderId} from id_map for deal ${dealId}`);
+        }
+      }
 
       // Case A: Unmapped Deal -> Create Shopify DRAFT ORDER
       if (!shopifyOrderId) {
@@ -577,7 +606,13 @@ const productUpdateHandler = async (req, res) => {
         return res.status(500).send('Shopify credentials not configured');
       }
 
-      const shopifyProductId = await getMappingWithFallback('products', product.PRODUCT_ID || productId);
+      let shopifyProductId = await getShopifyIdByBitrixId('products', productId);
+      if (!shopifyProductId) {
+        shopifyProductId = await getMappingWithFallback('products', product.PRODUCT_ID || productId);
+      }
+      if (shopifyProductId) {
+        debug('twoway', `productUpdateHandler: resolved shopifyProductId=${shopifyProductId} for Bitrix product ${productId}`);
+      }
 
       // Case A: Mapped Product -> UPDATE (safely preserving Shopify variant IDs)
       if (shopifyProductId) {
@@ -656,7 +691,33 @@ const productUpdateHandler = async (req, res) => {
   });
 };
 
+// Contact routes (Bitrix -> Shopify)
+router.post('/bitrix/contact-update', authorize, contactUpdateHandler);
+router.post('/bitrix/contact-add', authorize, contactUpdateHandler);
+router.post('/bitrix/contact-create', authorize, contactUpdateHandler);
+router.post('/bitrix/contact', authorize, contactUpdateHandler);
+router.post('/bitrix/contacts', authorize, contactUpdateHandler);
+router.post('/bitrix/customer-update', authorize, contactUpdateHandler);
+router.post('/bitrix/customer-add', authorize, contactUpdateHandler);
+router.post('/bitrix/customer', authorize, contactUpdateHandler);
+router.post('/bitrix/customers', authorize, contactUpdateHandler);
+
+// Deal routes (Bitrix -> Shopify)
+router.post('/bitrix/deal-update', authorize, dealUpdateHandler);
+router.post('/bitrix/deal-add', authorize, dealUpdateHandler);
+router.post('/bitrix/deal-create', authorize, dealUpdateHandler);
+router.post('/bitrix/deal', authorize, dealUpdateHandler);
+router.post('/bitrix/deals', authorize, dealUpdateHandler);
+router.post('/bitrix/order-update', authorize, dealUpdateHandler);
+router.post('/bitrix/order-add', authorize, dealUpdateHandler);
+router.post('/bitrix/order', authorize, dealUpdateHandler);
+
+// Product routes (Bitrix -> Shopify)
 router.post('/bitrix/product-update', authorize, productUpdateHandler);
+router.post('/bitrix/product-add', authorize, productUpdateHandler);
+router.post('/bitrix/product-create', authorize, productUpdateHandler);
+router.post('/bitrix/product', authorize, productUpdateHandler);
+router.post('/bitrix/products', authorize, productUpdateHandler);
 
 // ==================== UNIFIED EVENT DISPATCHER ====================
 const EVENT_HANDLERS = {
@@ -715,6 +776,10 @@ router.post('/bitrix/event', authorize, async (req, res) => {
       return res.status(err.status || 500).send(err.message);
     }
   });
+});
+
+router.post('/bitrix/events', authorize, async (req, res) => {
+  return router.handle(req, res);
 });
 
 // ==================== INVENTORY (Bitrix -> Shopify) ====================

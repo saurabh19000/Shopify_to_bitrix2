@@ -1,7 +1,8 @@
 require('dotenv').config();
 const axios = require('axios');
 const shopifyService = require('../src/services/shopify.service');
-const { getMappingWithFallback } = require('../src/utils/idMapStore');
+const { getMappingWithFallback, setMapping, getShopifyIdByBitrixId } = require('../src/utils/idMapStore');
+const bitrixService = require('../src/services/bitrix.service');
 
 /**
  * Pull Bitrix entities modified since a given date and push to Shopify.
@@ -21,27 +22,70 @@ const post = async (webhookUrl, method, payload) => {
   return res.data;
 };
 
+const extractFirstValue = (val) => {
+  if (!val) return '';
+  if (typeof val === 'string') return val.trim();
+  if (Array.isArray(val) && val.length > 0) {
+    const item = val[0];
+    return typeof item === 'string' ? item.trim() : (item?.VALUE || item?.value || '').trim();
+  }
+  if (typeof val === 'object') return (val.VALUE || val.value || '').trim();
+  return String(val).trim();
+};
+
 const syncContacts = async (since, shopDomain, accessToken, webhookUrl) => {
   console.log('\n=== Syncing Contacts (Bitrix -> Shopify) ===');
   const filter = {};
   if (since) filter[">DATE_MODIFY"] = since;
 
-  let start = 0, pushed = 0, skipped = 0;
+  let start = 0, pushed = 0, created = 0, skipped = 0;
   while (true) {
     const data = await post(webhookUrl, 'crm.contact.list', {
       filter,
-      select: ["ID", "NAME", "LAST_NAME", "EMAIL", "PHONE", "TAG", "UF_CRM_SHOPIFY_ID", "UF_CRM_CUSTOMER_NOTE", "DATE_MODIFY"],
+      select: ["ID", "NAME", "LAST_NAME", "EMAIL", "PHONE", "TAG", "UF_CRM_SHOPIFY_ID", "UF_CRM_CUSTOMER_NOTE", "UF_CRM_CUSTOMER_TAGS", "DATE_MODIFY", "ADDRESS", "ADDRESS_CITY", "ADDRESS_PROVINCE", "ADDRESS_COUNTRY", "ADDRESS_POSTAL_CODE", "COMPANY_TITLE"],
       start
     });
     const contacts = data.result || [];
     if (contacts.length === 0) break;
 
     for (const contact of contacts) {
-      if (!contact.UF_CRM_SHOPIFY_ID) { skipped++; continue; }
+      let shopifyId = contact.UF_CRM_SHOPIFY_ID;
+      if (!shopifyId) {
+        shopifyId = await getShopifyIdByBitrixId('contacts', contact.ID);
+      }
+
+      const email = extractFirstValue(contact.EMAIL);
+      const phone = extractFirstValue(contact.PHONE);
+
       try {
-        await shopifyService.updateCustomerByFields(contact.UF_CRM_SHOPIFY_ID, contact, shopDomain, accessToken);
-        pushed++;
-        console.log(`  Pushed contact ${contact.ID} -> Shopify customer ${contact.UF_CRM_SHOPIFY_ID}`);
+        if (shopifyId) {
+          await shopifyService.updateCustomerByFields(shopifyId, contact, shopDomain, accessToken);
+          pushed++;
+          console.log(`  Updated contact ${contact.ID} -> Shopify customer ${shopifyId}`);
+        } else {
+          // Check if exists by email/phone in Shopify
+          let existing = null;
+          if (email) existing = await shopifyService.findShopifyCustomerByEmail(email, shopDomain, accessToken);
+          if (!existing && phone) existing = await shopifyService.findShopifyCustomerByPhone(phone, shopDomain, accessToken);
+
+          if (existing) {
+            await bitrixService.updateContact(contact.ID, { UF_CRM_SHOPIFY_ID: String(existing.id) });
+            await shopifyService.updateCustomerByFields(existing.id, contact, shopDomain, accessToken);
+            await setMapping('contacts', existing.id, contact.ID);
+            pushed++;
+            console.log(`  Linked & updated contact ${contact.ID} -> existing Shopify customer ${existing.id}`);
+          } else {
+            const newCust = await shopifyService.createShopifyCustomer(contact, shopDomain, accessToken);
+            if (newCust) {
+              await bitrixService.updateContact(contact.ID, { UF_CRM_SHOPIFY_ID: String(newCust.id) });
+              await setMapping('contacts', newCust.id, contact.ID);
+              created++;
+              console.log(`  Created contact ${contact.ID} -> brand new Shopify customer ${newCust.id}`);
+            } else {
+              skipped++;
+            }
+          }
+        }
       } catch (err) {
         console.error(`  Failed contact ${contact.ID}:`, err.message);
       }
@@ -50,7 +94,7 @@ const syncContacts = async (since, shopDomain, accessToken, webhookUrl) => {
     if (!next) break;
     start = next;
   }
-  console.log(`Contacts done. Pushed: ${pushed}, skipped: ${skipped}`);
+  console.log(`Contacts done. Updated: ${pushed}, Created: ${created}, Skipped: ${skipped}`);
 };
 
 const syncDeals = async (since, shopDomain, accessToken, webhookUrl) => {
@@ -69,7 +113,10 @@ const syncDeals = async (since, shopDomain, accessToken, webhookUrl) => {
     if (deals.length === 0) break;
 
     for (const deal of deals) {
-      const shopifyOrderId = await getMappingWithFallback('deals_reverse', deal.ID);
+      let shopifyOrderId = await getMappingWithFallback('deals_reverse', deal.ID);
+      if (!shopifyOrderId) {
+        shopifyOrderId = await getShopifyIdByBitrixId('deals', deal.ID);
+      }
       if (!shopifyOrderId) { skipped++; continue; }
 
       const updateFields = {};
@@ -109,19 +156,21 @@ const syncProducts = async (since, shopDomain, accessToken, webhookUrl) => {
   const filter = {};
   if (since) filter[">DATE_MODIFY"] = since;
 
-  let start = 0, pushed = 0, skipped = 0;
+  let start = 0, pushed = 0, created = 0, skipped = 0;
   while (true) {
     const data = await post(webhookUrl, 'crm.product.list', {
       filter,
-      select: ["ID", "NAME", "DESCRIPTION", "PRICE", "VENDOR", "DATE_MODIFY"],
+      select: ["ID", "NAME", "DESCRIPTION", "PRICE", "VENDOR", "CODE", "DATE_MODIFY"],
       start
     });
     const products = data.result || [];
     if (products.length === 0) break;
 
     for (const product of products) {
-      const shopifyProductId = await getMappingWithFallback('products', product.ID);
-      if (!shopifyProductId) { skipped++; continue; }
+      let shopifyProductId = await getShopifyIdByBitrixId('products', product.ID);
+      if (!shopifyProductId) {
+        shopifyProductId = await getMappingWithFallback('products', product.ID);
+      }
 
       const updateFields = {};
       if (product.NAME) updateFields.title = product.NAME;
@@ -131,12 +180,23 @@ const syncProducts = async (since, shopDomain, accessToken, webhookUrl) => {
         updateFields.variants = [{ price: parseFloat(product.PRICE) }];
       }
 
-      if (Object.keys(updateFields).length === 0) { skipped++; continue; }
-
       try {
-        await shopifyService.updateShopifyProduct(shopifyProductId, updateFields, shopDomain, accessToken);
-        pushed++;
-        console.log(`  Pushed product ${product.ID} -> Shopify product ${shopifyProductId}`);
+        if (shopifyProductId) {
+          if (Object.keys(updateFields).length === 0) { skipped++; continue; }
+          await shopifyService.updateShopifyProduct(shopifyProductId, updateFields, shopDomain, accessToken);
+          pushed++;
+          console.log(`  Updated product ${product.ID} -> Shopify product ${shopifyProductId}`);
+        } else {
+          const newProd = await shopifyService.createShopifyProduct(product, shopDomain, accessToken);
+          if (newProd) {
+            await setMapping('products', String(newProd.id), String(product.ID));
+            await setMapping('products_reverse', String(product.ID), String(newProd.id));
+            created++;
+            console.log(`  Created product ${product.ID} -> brand new Shopify product ${newProd.id}`);
+          } else {
+            skipped++;
+          }
+        }
       } catch (err) {
         console.error(`  Failed product ${product.ID}:`, err.message);
       }
@@ -145,7 +205,7 @@ const syncProducts = async (since, shopDomain, accessToken, webhookUrl) => {
     if (!next) break;
     start = next;
   }
-  console.log(`Products done. Pushed: ${pushed}, skipped: ${skipped}`);
+  console.log(`Products done. Updated: ${pushed}, Created: ${created}, Skipped: ${skipped}`);
 };
 
 const run = async () => {

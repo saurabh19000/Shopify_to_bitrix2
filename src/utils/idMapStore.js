@@ -83,10 +83,55 @@ async function deleteMapping(type, shopifyId, shop) {
   }
 }
 
+// Reverse lookup: Given a Bitrix ID, find the corresponding Shopify ID.
+async function getShopifyIdByBitrixId(type, bitrixId, shop) {
+  const s = shopOf(shop);
+  if (!bitrixId) return null;
+  try {
+    let result = await pool.query(
+      'SELECT shopify_id FROM id_map WHERE (shop = $1 OR shop = \'\') AND type = $2 AND bitrix_id = $3 LIMIT 1',
+      [s, type, String(bitrixId)]
+    );
+    if (result.rows.length > 0) {
+      debug('idmap', `getShopifyIdByBitrixId: HIT type=${type} bitrixId=${bitrixId} -> ${result.rows[0].shopify_id}`);
+      return result.rows[0].shopify_id;
+    }
+    // Also check if stored with shopify_id = bitrixId (e.g. deals_reverse or product mapping)
+    result = await pool.query(
+      'SELECT bitrix_id FROM id_map WHERE (shop = $1 OR shop = \'\') AND type = $2 AND shopify_id = $3 LIMIT 1',
+      [s, type, String(bitrixId)]
+    );
+    if (result.rows.length > 0) {
+      debug('idmap', `getShopifyIdByBitrixId: HIT (as key) type=${type} bitrixId=${bitrixId} -> ${result.rows[0].bitrix_id}`);
+      return result.rows[0].bitrix_id;
+    }
+  } catch (err) {
+    debug('idmap', `getShopifyIdByBitrixId: query failed (${err.message}) — trying legacy schema`);
+    try {
+      let result = await pool.query(
+        'SELECT shopify_id FROM id_map WHERE type = $1 AND bitrix_id = $2 LIMIT 1',
+        [type, String(bitrixId)]
+      );
+      if (result.rows.length > 0) return result.rows[0].shopify_id;
+
+      result = await pool.query(
+        'SELECT bitrix_id FROM id_map WHERE type = $1 AND shopify_id = $2 LIMIT 1',
+        [type, String(bitrixId)]
+      );
+      if (result.rows.length > 0) return result.rows[0].bitrix_id;
+    } catch (e) {
+      debug('idmap', `getShopifyIdByBitrixId: legacy failed (${e.message})`);
+    }
+  }
+  return null;
+}
+
 module.exports = {
   setMapping,
   getMapping,
   getMappingLegacy,
   getMappingWithFallback,
+  getShopifyIdByBitrixId,
+  getMappingByBitrixId: getShopifyIdByBitrixId,
   deleteMapping
 };

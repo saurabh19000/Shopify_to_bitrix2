@@ -199,9 +199,11 @@ app.post('/webhooks/shopify/app-uninstalled', webhookHandler(async (payload, ctx
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-debug('app', 'Mounting routes: /migration (bulk import) + /sync (Bitrix->Shopify two-way)');
+debug('app', 'Mounting routes: /migration (bulk import) + /sync, /webhooks/bitrix, /bitrix (Bitrix->Shopify two-way)');
 app.use('/migration', migrationRoutes);
 app.use('/sync', syncRoutes);
+app.use('/webhooks/bitrix', syncRoutes);
+app.use('/bitrix', syncRoutes);
 
 app.get('/', (req, res) => {
   const shop = req.query.shop;

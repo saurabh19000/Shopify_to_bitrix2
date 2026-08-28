@@ -321,6 +321,25 @@ const updateContact = async (contactId, fields) => {
   }
 };
 
+const createContact = async (fields, params = {}) => {
+  debug('bitrix', 'createContact: creating contact', { fieldKeys: Object.keys(fields) });
+  const data = await bitrixRequest('crm.contact.add', { fields, params });
+  const id = data?.result;
+  debug('bitrix', `createContact: created contact ${id}`);
+  return id;
+};
+
+const deleteContact = async (contactId) => {
+  debug('bitrix', `deleteContact: deleting contact ${contactId}`);
+  try {
+    const data = await bitrixRequest('crm.contact.delete', { id: contactId });
+    return data?.result === true;
+  } catch (err) {
+    debug('bitrix', `deleteContact: error deleting contact ${contactId} (${err.message})`);
+    return false;
+  }
+};
+
 const getDeal = async (dealId) => {
   const data = await bitrixRequest('crm.deal.get', { id: dealId });
   debug('bitrix', `getDeal: ${dealId} -> ${data?.result ? `found "${data.result.TITLE}"` : 'null'}`);
@@ -860,6 +879,7 @@ module.exports = {
   findProductById,
   findDealByOrderNumber,
   createContact,
+  deleteContact,
   createProduct,
   createDeal,
   createOrUpdateContact: createContact,

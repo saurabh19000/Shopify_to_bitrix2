@@ -93,6 +93,40 @@ const registerWebhooks = async () => {
 };
 
 /**
+ * Normalize phone number to E.164 format for Shopify.
+ */
+const formatE164Phone = (phone, defaultCountry = 'IN') => {
+  if (!phone) return '';
+  let cleaned = String(phone).trim().replace(/[^\d+]/g, '');
+  if (!cleaned) return '';
+  if (cleaned.startsWith('00')) cleaned = '+' + cleaned.slice(2);
+  if (cleaned.startsWith('+')) return cleaned;
+  if (/^\d{10}$/.test(cleaned) && defaultCountry === 'IN') {
+    return '+91' + cleaned;
+  }
+  if (/^0\d{10}$/.test(cleaned) && defaultCountry === 'IN') {
+    return '+91' + cleaned.slice(1);
+  }
+  return cleaned.startsWith('+') ? cleaned : `+${cleaned}`;
+};
+
+/**
+ * Safely format and merge tags into a comma-separated string.
+ */
+const extractTags = (tagField, ufTagField) => {
+  const tags = [];
+  if (Array.isArray(tagField)) {
+    tags.push(...tagField.filter(Boolean).map(String));
+  } else if (typeof tagField === 'string' && tagField.trim()) {
+    tags.push(...tagField.split(',').map(t => t.trim()).filter(Boolean));
+  }
+  if (typeof ufTagField === 'string' && ufTagField.trim()) {
+    tags.push(...ufTagField.split(',').map(t => t.trim()).filter(Boolean));
+  }
+  return [...new Set(tags)].join(', ');
+};
+
+/**
  * Push updated contact fields back to Shopify (Bitrix -> Shopify two-way sync).
  */
 const updateShopifyCustomer = async (shopifyId, fields, shopDomain, accessToken, syncId = '') => {
@@ -103,12 +137,33 @@ const updateShopifyCustomer = async (shopifyId, fields, shopDomain, accessToken,
   setValue(customer, 'first_name', fields.first_name || fields.NAME);
   setValue(customer, 'last_name', fields.last_name || fields.LAST_NAME);
   setValue(customer, 'email', fields.email);
-  setValue(customer, 'phone', fields.phone);
+  if (fields.phone) {
+    const formattedPhone = formatE164Phone(fields.phone);
+    if (formattedPhone) customer.phone = formattedPhone;
+  }
   setValue(customer, 'tags', fields.tags);
   setValue(customer, 'note', fields.note);
 
   if (fields.addresses && Array.isArray(fields.addresses) && fields.addresses.length > 0) {
-    customer.addresses = fields.addresses;
+    customer.addresses = fields.addresses.map(a => ({
+      ...a,
+      phone: a.phone ? formatE164Phone(a.phone) : undefined
+    }));
+  }
+
+  if (fields.email_marketing_consent) {
+    customer.email_marketing_consent = typeof fields.email_marketing_consent === 'object'
+      ? fields.email_marketing_consent
+      : { state: 'subscribed', opt_in_level: 'single_opt_in', consent_updated_at: new Date().toISOString() };
+  }
+  if (fields.sms_marketing_consent) {
+    customer.sms_marketing_consent = typeof fields.sms_marketing_consent === 'object'
+      ? fields.sms_marketing_consent
+      : { state: 'subscribed', opt_in_level: 'single_opt_in', consent_updated_at: new Date().toISOString(), consent_collected_from: 'OTHER' };
+  }
+
+  if (fields.metafields && Array.isArray(fields.metafields) && fields.metafields.length > 0) {
+    customer.metafields = fields.metafields;
   }
 
   if (Object.keys(customer).length === 0) {
@@ -142,6 +197,37 @@ const updateShopifyCustomer = async (shopifyId, fields, shopDomain, accessToken,
     });
     return response.data.customer;
   } catch (err) {
+    // If Shopify rejected the phone format, retry without phone
+    if (customer.phone && err.response?.data?.errors?.phone) {
+      debug('shopify', `updateShopifyCustomer: phone rejected by Shopify for customer ${shopifyId} — retrying without phone`);
+      const fallbackCustomer = { ...customer };
+      delete fallbackCustomer.phone;
+      delete fallbackCustomer.sms_marketing_consent;
+      if (fallbackCustomer.addresses && fallbackCustomer.addresses[0]) {
+        fallbackCustomer.addresses = fallbackCustomer.addresses.map(a => {
+          const c = { ...a };
+          delete c.phone;
+          return c;
+        });
+      }
+      try {
+        const retryRes = await axios.put(endpoint, { customer: fallbackCustomer }, { headers: getAuthHeaders(accessToken) });
+        const duration = Date.now() - startTime;
+        logShopifyResponse({
+          syncId,
+          entity: 'customer',
+          entityId: shopifyId,
+          statusCode: retryRes.status,
+          status: 'SUCCESS',
+          response: retryRes.data,
+          duration
+        });
+        return retryRes.data.customer;
+      } catch (retryErr) {
+        // Continue to throw standard error below
+      }
+    }
+
     const duration = Date.now() - startTime;
     const statusCode = err.response?.status || 500;
     const responseBody = err.response?.data;
@@ -186,6 +272,7 @@ const getCustomerOrders = async (customerId, shopDomain, accessToken, maxPages =
 const updateCustomerByFields = async (shopifyId, contact, shopDomain, accessToken, syncId = '') => {
   const email = extractFirstValue(contact.EMAIL);
   const phone = extractFirstValue(contact.PHONE);
+  const tags = extractTags(contact.TAG, contact.UF_CRM_CUSTOMER_TAGS);
   
   const addresses = [];
   if (contact.ADDRESS || contact.ADDRESS_CITY || contact.ADDRESS_PROVINCE || contact.ADDRESS_COUNTRY) {
@@ -198,7 +285,7 @@ const updateCustomerByFields = async (shopifyId, contact, shopDomain, accessToke
       company: contact.COMPANY_TITLE || '',
       first_name: contact.NAME || '',
       last_name: contact.LAST_NAME || '',
-      phone: phone || ''
+      phone: phone ? formatE164Phone(phone) : ''
     });
   }
 
@@ -207,7 +294,7 @@ const updateCustomerByFields = async (shopifyId, contact, shopDomain, accessToke
     last_name: contact.LAST_NAME,
     email,
     phone,
-    tags: (contact.TAG && contact.TAG.length ? contact.TAG.join(', ') : '') || contact.UF_CRM_CUSTOMER_TAGS || '',
+    tags,
     note: contact.UF_CRM_CUSTOMER_NOTE || '',
     addresses: addresses.length > 0 ? addresses : undefined
   }, shopDomain, accessToken, syncId);
@@ -480,21 +567,45 @@ const extractFirstValue = (val) => {
 const createShopifyCustomer = async (contact, shopDomain, accessToken, syncId = '') => {
   const email = extractFirstValue(contact.EMAIL);
   const phone = extractFirstValue(contact.PHONE);
-  if (!email && !phone) {
-    debug('shopify', 'createShopifyCustomer: contact has neither email nor phone — cannot create in Shopify');
+  const firstName = contact.NAME || '';
+  const lastName = contact.LAST_NAME || '';
+  const tags = extractTags(contact.TAG, contact.UF_CRM_CUSTOMER_TAGS);
+  const note = contact.UF_CRM_CUSTOMER_NOTE || '';
+
+  // Require at least a name, email, phone, company, or note to create a customer
+  if (!firstName && !lastName && !email && !phone && !contact.COMPANY_TITLE && !note) {
+    debug('shopify', 'createShopifyCustomer: contact has no identifying information — cannot create in Shopify');
     return null;
   }
 
-  const customer = {
-    first_name: contact.NAME || '',
-    last_name: contact.LAST_NAME || ''
-  };
-  if (email) customer.email = email;
-  if (phone) customer.phone = phone;
-  if (email) customer.verified_email = true;
-  const tags = (contact.TAG && contact.TAG.length ? contact.TAG.join(', ') : '') || contact.UF_CRM_CUSTOMER_TAGS || '';
+  const customer = {};
+  if (firstName) customer.first_name = firstName;
+  if (lastName) customer.last_name = lastName;
+  if (email) {
+    customer.email = email;
+    customer.verified_email = true;
+  }
+  if (phone) {
+    const formattedPhone = formatE164Phone(phone);
+    if (formattedPhone) customer.phone = formattedPhone;
+  }
   if (tags) customer.tags = tags;
-  if (contact.UF_CRM_CUSTOMER_NOTE) customer.note = contact.UF_CRM_CUSTOMER_NOTE;
+  if (note) customer.note = note;
+
+  if (contact.email_marketing_consent || contact.MARKETING_SUBSCRIPTION === 'Y' || contact.MARKETING_SUBSCRIPTION === true) {
+    customer.email_marketing_consent = typeof contact.email_marketing_consent === 'object'
+      ? contact.email_marketing_consent
+      : { state: 'subscribed', opt_in_level: 'single_opt_in', consent_updated_at: new Date().toISOString() };
+  }
+  if (contact.sms_marketing_consent) {
+    customer.sms_marketing_consent = typeof contact.sms_marketing_consent === 'object'
+      ? contact.sms_marketing_consent
+      : { state: 'subscribed', opt_in_level: 'single_opt_in', consent_updated_at: new Date().toISOString(), consent_collected_from: 'OTHER' };
+  }
+
+  if (contact.metafields && Array.isArray(contact.metafields) && contact.metafields.length > 0) {
+    customer.metafields = contact.metafields;
+  }
 
   if (contact.ADDRESS || contact.ADDRESS_CITY || contact.ADDRESS_PROVINCE || contact.ADDRESS_COUNTRY) {
     customer.addresses = [{
@@ -504,9 +615,9 @@ const createShopifyCustomer = async (contact, shopDomain, accessToken, syncId = 
       country: contact.ADDRESS_COUNTRY || '',
       zip: contact.ADDRESS_POSTAL_CODE || '',
       company: contact.COMPANY_TITLE || '',
-      first_name: contact.NAME || '',
-      last_name: contact.LAST_NAME || '',
-      phone: phone || ''
+      first_name: firstName,
+      last_name: lastName,
+      phone: phone ? formatE164Phone(phone) : undefined
     }];
   }
 
@@ -536,14 +647,22 @@ const createShopifyCustomer = async (contact, shopDomain, accessToken, syncId = 
     });
     return response.data.customer;
   } catch (err) {
-    // If Shopify rejected the phone format but we have a valid email, retry without the phone
-    if (customer.phone && customer.email && err.response?.data?.errors?.phone) {
-      debug('shopify', 'createShopifyCustomer: phone rejected by Shopify — retrying with email only');
+    // If Shopify rejected the phone format, retry without phone (saving phone into note)
+    if (customer.phone && err.response?.data?.errors?.phone) {
+      debug('shopify', 'createShopifyCustomer: phone rejected by Shopify — retrying with note fallback');
       const fallbackCustomer = { ...customer };
+      const failedPhone = fallbackCustomer.phone;
       delete fallbackCustomer.phone;
+      delete fallbackCustomer.sms_marketing_consent;
+      fallbackCustomer.note = fallbackCustomer.note
+        ? `${fallbackCustomer.note} | Phone: ${failedPhone}`
+        : `Phone: ${failedPhone}`;
       if (fallbackCustomer.addresses && fallbackCustomer.addresses[0]) {
-        fallbackCustomer.addresses = [{ ...fallbackCustomer.addresses[0] }];
-        delete fallbackCustomer.addresses[0].phone;
+        fallbackCustomer.addresses = fallbackCustomer.addresses.map(a => {
+          const c = { ...a };
+          delete c.phone;
+          return c;
+        });
       }
       try {
         const retryResponse = await axios.post(endpoint, { customer: fallbackCustomer }, { headers: getAuthHeaders(accessToken) });
@@ -559,7 +678,7 @@ const createShopifyCustomer = async (contact, shopDomain, accessToken, syncId = 
         });
         return retryResponse.data.customer;
       } catch (retryErr) {
-        // Continue to throw standard error below
+        // Fall through to standard error handling
       }
     }
 
@@ -769,10 +888,58 @@ const completeShopifyDraftOrder = async (draftOrderId, shopDomain, accessToken, 
   }
 };
 
+/**
+ * Delete a customer in Shopify (useful for cleanup and teardown).
+ */
+const deleteShopifyCustomer = async (shopifyId, shopDomain, accessToken, syncId = '') => {
+  const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/customers/${shopifyId}.json`;
+  logShopifyRequest({
+    syncId,
+    entity: 'customer',
+    entityId: shopifyId,
+    operation: 'DELETE',
+    endpoint,
+    method: 'DELETE',
+    payload: {}
+  });
+
+  const startTime = Date.now();
+  try {
+    const response = await axios.delete(endpoint, { headers: getAuthHeaders(accessToken) });
+    const duration = Date.now() - startTime;
+    logShopifyResponse({
+      syncId,
+      entity: 'customer',
+      entityId: shopifyId,
+      statusCode: response.status,
+      status: 'SUCCESS',
+      response: response.data,
+      duration
+    });
+    return true;
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    const statusCode = err.response?.status || 500;
+    const responseBody = err.response?.data;
+    logShopifyResponse({
+      syncId,
+      entity: 'customer',
+      entityId: shopifyId,
+      statusCode,
+      status: 'FAILED',
+      response: responseBody,
+      duration,
+      error: err.message
+    });
+    return false;
+  }
+};
+
 module.exports = {
   registerWebhooks,
   updateShopifyCustomer,
   updateCustomerByFields,
+  deleteShopifyCustomer,
   getCustomerOrders,
   updateShopifyOrder,
   updateShopifyProduct,
