@@ -412,7 +412,7 @@ const dealUpdateHandler = async (req, res) => {
         }
 
         let contact = null;
-        if (deal.CONTACT_ID) {
+        if (deal.CONTACT_ID && String(deal.CONTACT_ID) !== '0' && String(deal.CONTACT_ID) !== 'null') {
           contact = await bitrixService.getContact(deal.CONTACT_ID);
         }
 

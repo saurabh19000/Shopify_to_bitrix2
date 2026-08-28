@@ -301,12 +301,14 @@ const findContactByShopifyId = async (shopifyCustomerId) => {
 };
 
 const getContact = async (contactId) => {
+  if (!contactId || String(contactId) === '0' || String(contactId) === 'null') return null;
   const data = await bitrixRequest('crm.contact.get', { id: contactId });
   debug('bitrix', `getContact: ${contactId} -> ${data?.result ? `found "${data.result.NAME}"` : 'null'}`);
   return data?.result || null;
 };
 
 const updateContact = async (contactId, fields) => {
+  if (!contactId || String(contactId) === '0' || String(contactId) === 'null') return null;
   debug('bitrix', `updateContact: updating contact ${contactId}`, { fieldKeys: Object.keys(fields) });
   try {
     await bitrixRequest('crm.contact.update', { id: contactId, fields });
@@ -322,6 +324,7 @@ const updateContact = async (contactId, fields) => {
 };
 
 const deleteContact = async (contactId) => {
+  if (!contactId || String(contactId) === '0' || String(contactId) === 'null') return false;
   debug('bitrix', `deleteContact: deleting contact ${contactId}`);
   try {
     const data = await bitrixRequest('crm.contact.delete', { id: contactId });
@@ -333,12 +336,14 @@ const deleteContact = async (contactId) => {
 };
 
 const getDeal = async (dealId) => {
+  if (!dealId || String(dealId) === '0' || String(dealId) === 'null') return null;
   const data = await bitrixRequest('crm.deal.get', { id: dealId });
   debug('bitrix', `getDeal: ${dealId} -> ${data?.result ? `found "${data.result.TITLE}"` : 'null'}`);
   return data?.result || null;
 };
 
 const getDealProductRows = async (dealId) => {
+  if (!dealId || String(dealId) === '0' || String(dealId) === 'null') return [];
   const data = await bitrixRequest('crm.deal.productrows.get', { id: dealId });
   const rows = data?.result || [];
   debug('bitrix', `getDealProductRows: deal ${dealId} -> ${rows.length} row(s)`);
@@ -346,6 +351,7 @@ const getDealProductRows = async (dealId) => {
 };
 
 const getProduct = async (bitrixProductId) => {
+  if (!bitrixProductId || String(bitrixProductId) === '0' || String(bitrixProductId) === 'null') return null;
   const data = await bitrixRequest('crm.product.get', { id: bitrixProductId });
   debug('bitrix', `getProduct: ${bitrixProductId} -> ${data?.result ? `found "${data.result.NAME}"` : 'null'}`);
   return data?.result || null;
