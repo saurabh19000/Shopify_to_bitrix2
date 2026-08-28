@@ -455,22 +455,36 @@ const dealUpdateHandler = async (req, res) => {
           billingAddress = addr;
         }
 
-        // Stage 4: Mapping
-        logMapping({
-          syncId,
-          source: 'BITRIX',
-          target: 'SHOPIFY',
-          entity: 'draft_order',
-          status: 'SUCCESS',
-          bitrixId: dealId,
-          shopifyPayload: {
-            lineItemsCount: lineItems.length,
-            customerId: customerRef ? customerRef.id : null,
-            email: contact?.EMAIL?.[0]?.VALUE,
-            note: deal.COMMENTS
-          }
-        });
+        // Stage 4: Create Real Order (or Draft Order) in Shopify
+        let createdOrder = null;
+        try {
+          const orderPayload = {
+            line_items: lineItems,
+            financial_status: deal.STAGE_ID === 'WON' ? 'paid' : (deal.UF_CRM_FINANCIAL_STATUS || 'pending'),
+            fulfillment_status: deal.UF_CRM_FULFILLMENT_STATUS || null,
+            note: deal.COMMENTS || `Created from Bitrix Deal #${dealId}: ${deal.TITLE}`,
+            tags: `BitrixSync, Deal_${dealId}`
+          };
+          if (customerRef?.id) orderPayload.customer = { id: Number(customerRef.id) };
+          if (contact?.EMAIL?.[0]?.VALUE) orderPayload.email = contact.EMAIL[0].VALUE;
+          if (shippingAddress) orderPayload.shipping_address = shippingAddress;
+          if (billingAddress) orderPayload.billing_address = billingAddress;
 
+          createdOrder = await shopifyService.createShopifyOrder(orderPayload, creds.shopDomain, creds.accessToken, syncId);
+        } catch (orderErr) {
+          debug('twoway', `dealUpdateHandler: direct order creation failed (${orderErr.message}) — attempting draft order fallback`);
+        }
+
+        if (createdOrder && createdOrder.id) {
+          await setMapping('deals_reverse', String(dealId), String(createdOrder.id));
+          await setMapping('deals', String(createdOrder.id), String(dealId));
+          recordSync('BITRIX_TO_SHOPIFY', 'deal', dealId);
+          logMappingSave({ syncId, entity: 'order', bitrixId: dealId, shopifyId: createdOrder.id, status: 'SUCCESS' });
+          logSyncComplete({ syncId, entity: 'order', bitrixId: dealId, shopifyId: createdOrder.id, duration: Date.now() - startedAt, message: 'Created real Shopify order from Bitrix deal' });
+          return res.status(200).send('OK');
+        }
+
+        // Draft Order Creation Fallback
         const draft = await shopifyService.createShopifyDraftOrder({
           lineItems,
           customerId: customerRef ? Number(customerRef.id) : null,
@@ -481,7 +495,7 @@ const dealUpdateHandler = async (req, res) => {
         }, creds.shopDomain, creds.accessToken, syncId);
 
         if (!draft) {
-          logSyncFailed({ syncId, entity: 'deal', bitrixId: dealId, error: 'Failed to create Shopify draft order', stage: 'SHOPIFY_API' });
+          logSyncFailed({ syncId, entity: 'deal', bitrixId: dealId, error: 'Failed to create Shopify order/draft order', stage: 'SHOPIFY_API' });
           return res.status(500).send('Failed to create Shopify draft order');
         }
 
@@ -490,14 +504,18 @@ const dealUpdateHandler = async (req, res) => {
         logMappingSave({ syncId, entity: 'deal_reverse', bitrixId: dealId, shopifyId: draft.id, status: 'SUCCESS' });
 
         // Optional auto-complete to turn draft order into real Shopify Order
-        if (process.env.BITRIX_DRAFT_ORDER_AUTOCOMPLETE === 'true') {
-          const completed = await shopifyService.completeShopifyDraftOrder(draft.id, creds.shopDomain, creds.accessToken, syncId);
-          if (completed && completed.order_id) {
-            await setMapping('deals_reverse', String(dealId), String(completed.order_id));
-            await setMapping('deals', String(completed.order_id), String(dealId));
-            logMappingSave({ syncId, entity: 'order', bitrixId: dealId, shopifyId: completed.order_id, status: 'SUCCESS' });
-            logSyncComplete({ syncId, entity: 'order', bitrixId: dealId, shopifyId: completed.order_id, duration: Date.now() - startedAt, message: 'Auto-completed draft into real Shopify order' });
-            return res.status(200).send('OK');
+        if (process.env.BITRIX_DRAFT_ORDER_AUTOCOMPLETE === 'true' || deal.STAGE_ID === 'WON') {
+          try {
+            const completed = await shopifyService.completeShopifyDraftOrder(draft.id, creds.shopDomain, creds.accessToken, syncId);
+            if (completed && completed.order_id) {
+              await setMapping('deals_reverse', String(dealId), String(completed.order_id));
+              await setMapping('deals', String(completed.order_id), String(dealId));
+              logMappingSave({ syncId, entity: 'order', bitrixId: dealId, shopifyId: completed.order_id, status: 'SUCCESS' });
+              logSyncComplete({ syncId, entity: 'order', bitrixId: dealId, shopifyId: completed.order_id, duration: Date.now() - startedAt, message: 'Auto-completed draft into real Shopify order' });
+              return res.status(200).send('OK');
+            }
+          } catch (compErr) {
+            debug('twoway', `dealUpdateHandler: auto-complete failed (${compErr.message}) — remaining as draft order`);
           }
         }
 
@@ -691,6 +709,42 @@ const productUpdateHandler = async (req, res) => {
   });
 };
 
+const productDeleteHandler = async (req, res) => {
+  const syncId = generateSyncId('BTX-SHP-PROD-DEL');
+  const startedAt = Date.now();
+  return runWithRequestId(syncId, async () => {
+    try {
+      const { id: productId } = extractBitrixEventData(req, 'ONCRMPRODUCTDELETE');
+      if (!productId) return res.status(200).send('No product ID');
+
+      const creds = await resolveShopifyCreds();
+      if (!creds.shopDomain || !creds.accessToken) return res.status(500).send('Shopify credentials missing');
+
+      let shopifyProductId = await getShopifyIdByBitrixId('products', productId);
+      if (!shopifyProductId) {
+        shopifyProductId = await getMappingWithFallback('products', productId);
+      }
+
+      if (!shopifyProductId) {
+        debug('twoway', `productDeleteHandler: Bitrix product ${productId} was not mapped in Shopify — skipping`);
+        return res.status(200).send('Product not mapped');
+      }
+
+      debug('twoway', `productDeleteHandler: deleting Shopify product ${shopifyProductId} for Bitrix product ${productId}`);
+      recordSync('SHOPIFY_TO_BITRIX', 'product', productId);
+      await shopifyService.deleteShopifyProduct(shopifyProductId, creds.shopDomain, creds.accessToken, syncId);
+      await deleteMapping('products', productId);
+      await deleteMapping('products', shopifyProductId);
+      recordSync('BITRIX_TO_SHOPIFY', 'product', productId);
+
+      logSyncComplete({ syncId, entity: 'product_delete', bitrixId: productId, shopifyId: shopifyProductId, duration: Date.now() - startedAt });
+      return res.status(200).send('Deleted in Shopify');
+    } catch (err) {
+      return res.status(err.status || 500).send(err.message);
+    }
+  });
+};
+
 // Contact routes (Bitrix -> Shopify)
 router.post('/bitrix/contact-update', authorize, contactUpdateHandler);
 router.post('/bitrix/contact-add', authorize, contactUpdateHandler);
@@ -716,6 +770,7 @@ router.post('/bitrix/order', authorize, dealUpdateHandler);
 router.post('/bitrix/product-update', authorize, productUpdateHandler);
 router.post('/bitrix/product-add', authorize, productUpdateHandler);
 router.post('/bitrix/product-create', authorize, productUpdateHandler);
+router.post('/bitrix/product-delete', authorize, productDeleteHandler);
 router.post('/bitrix/product', authorize, productUpdateHandler);
 router.post('/bitrix/products', authorize, productUpdateHandler);
 
@@ -723,7 +778,8 @@ router.post('/bitrix/products', authorize, productUpdateHandler);
 const EVENT_HANDLERS = {
   contact: contactUpdateHandler,
   deal: dealUpdateHandler,
-  product: productUpdateHandler
+  product: productUpdateHandler,
+  product_delete: productDeleteHandler
 };
 
 router.post('/bitrix/event', authorize, async (req, res) => {
@@ -737,6 +793,11 @@ router.post('/bitrix/event', authorize, async (req, res) => {
       if (!eventName || !id) {
         logValidation({ syncId, entity: 'general', entityId: id || 'N/A', status: 'SKIPPED', missingFields: 'eventName_or_id', details: { eventName } });
         return res.status(200).send(`Event ${eventName || 'UNKNOWN'} skipped (no entity ID)`);
+      }
+
+      if (eventName.includes('PRODUCT') && (eventName.endsWith('_DELETE') || eventName.includes('DELETE'))) {
+        req.body = { ...req.body, event: eventName, data: { FIELDS: { ID: String(id) } } };
+        return await productDeleteHandler(req, res);
       }
 
       if (eventName.endsWith('_DELETE') || eventName.includes('DELETE')) {

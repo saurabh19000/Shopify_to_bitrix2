@@ -935,6 +935,103 @@ const deleteShopifyCustomer = async (shopifyId, shopDomain, accessToken, syncId 
   }
 };
 
+/**
+ * Create a REAL Shopify Order directly from a Bitrix deal.
+ */
+const createShopifyOrder = async (orderPayload, shopDomain, accessToken, syncId = '') => {
+  const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/orders.json`;
+  logShopifyRequest({
+    syncId,
+    entity: 'order',
+    entityId: 'NEW',
+    operation: 'CREATE',
+    endpoint,
+    method: 'POST',
+    payload: { order: orderPayload }
+  });
+
+  const startTime = Date.now();
+  try {
+    const response = await axios.post(endpoint, { order: orderPayload }, { headers: getAuthHeaders(accessToken) });
+    const duration = Date.now() - startTime;
+    logShopifyResponse({
+      syncId,
+      entity: 'order',
+      entityId: response.data.order?.id,
+      statusCode: response.status,
+      status: 'SUCCESS',
+      response: response.data,
+      duration
+    });
+    return response.data.order;
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    const statusCode = err.response?.status || 500;
+    const responseBody = err.response?.data;
+    logShopifyResponse({
+      syncId,
+      entity: 'order',
+      entityId: 'NEW',
+      statusCode,
+      status: 'FAILED',
+      response: responseBody,
+      duration,
+      error: err.message
+    });
+    throw Object.assign(new Error(responseBody ? JSON.stringify(responseBody) : err.message), {
+      status: statusCode,
+      responseBody
+    });
+  }
+};
+
+/**
+ * Delete a product in Shopify (when deleted in Bitrix24).
+ */
+const deleteShopifyProduct = async (shopifyProductId, shopDomain, accessToken, syncId = '') => {
+  const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/products/${shopifyProductId}.json`;
+  logShopifyRequest({
+    syncId,
+    entity: 'product',
+    entityId: shopifyProductId,
+    operation: 'DELETE',
+    endpoint,
+    method: 'DELETE',
+    payload: {}
+  });
+
+  const startTime = Date.now();
+  try {
+    const response = await axios.delete(endpoint, { headers: getAuthHeaders(accessToken) });
+    const duration = Date.now() - startTime;
+    logShopifyResponse({
+      syncId,
+      entity: 'product',
+      entityId: shopifyProductId,
+      statusCode: response.status,
+      status: 'SUCCESS',
+      response: response.data,
+      duration
+    });
+    return true;
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    const statusCode = err.response?.status || 500;
+    const responseBody = err.response?.data;
+    logShopifyResponse({
+      syncId,
+      entity: 'product',
+      entityId: shopifyProductId,
+      statusCode,
+      status: 'FAILED',
+      response: responseBody,
+      duration,
+      error: err.message
+    });
+    return false;
+  }
+};
+
 module.exports = {
   registerWebhooks,
   updateShopifyCustomer,
@@ -942,12 +1039,14 @@ module.exports = {
   deleteShopifyCustomer,
   getCustomerOrders,
   updateShopifyOrder,
+  createShopifyOrder,
   updateShopifyProduct,
+  createShopifyProduct,
+  deleteShopifyProduct,
   updateShopifyInventory,
   findShopifyCustomerByEmail,
   findShopifyCustomerByPhone,
   createShopifyCustomer,
-  createShopifyProduct,
   createShopifyDraftOrder,
   completeShopifyDraftOrder
 };
