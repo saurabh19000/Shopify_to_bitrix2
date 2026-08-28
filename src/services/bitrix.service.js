@@ -321,14 +321,6 @@ const updateContact = async (contactId, fields) => {
   }
 };
 
-const createContact = async (fields, params = {}) => {
-  debug('bitrix', 'createContact: creating contact', { fieldKeys: Object.keys(fields) });
-  const data = await bitrixRequest('crm.contact.add', { fields, params });
-  const id = data?.result;
-  debug('bitrix', `createContact: created contact ${id}`);
-  return id;
-};
-
 const deleteContact = async (contactId) => {
   debug('bitrix', `deleteContact: deleting contact ${contactId}`);
   try {
@@ -403,6 +395,14 @@ const splitTags = (tags) => {
 };
 
 const createContact = async (customer, opts = {}) => {
+  if (customer && (customer.NAME !== undefined || customer.FIELDS !== undefined)) {
+    debug('bitrix', 'createContact: creating contact from raw Bitrix fields', { fieldKeys: Object.keys(customer) });
+    const data = await bitrixRequest('crm.contact.add', { fields: customer.FIELDS || customer, params: opts });
+    const id = data?.result;
+    debug('bitrix', `createContact: created contact ${id}`);
+    return id;
+  }
+
   debug('bitrix', `createContact: START shopifyId=${customer.id} email=${customer.email || 'none'} name="${customer.first_name || ''} ${customer.last_name || ''}"`);
   const email = customer.email;
   const phone = customer.phone || (customer.default_address && customer.default_address.phone);
