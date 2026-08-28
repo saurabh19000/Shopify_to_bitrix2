@@ -709,6 +709,78 @@ const productUpdateHandler = async (req, res) => {
   });
 };
 
+const contactDeleteHandler = async (req, res) => {
+  const syncId = generateSyncId('BTX-SHP-CUST-DEL');
+  const startedAt = Date.now();
+  return runWithRequestId(syncId, async () => {
+    try {
+      const { id: contactId } = extractBitrixEventData(req, 'ONCRMCONTACTDELETE');
+      if (!contactId) return res.status(200).send('No contact ID');
+
+      const creds = await resolveShopifyCreds();
+      if (!creds.shopDomain || !creds.accessToken) return res.status(500).send('Shopify credentials missing');
+
+      let shopifyCustomerId = await getShopifyIdByBitrixId('contacts', contactId);
+      if (!shopifyCustomerId) {
+        shopifyCustomerId = await getMappingWithFallback('contacts', contactId);
+      }
+
+      if (!shopifyCustomerId) {
+        debug('twoway', `contactDeleteHandler: Bitrix contact ${contactId} was not mapped in Shopify — skipping`);
+        return res.status(200).send('Contact not mapped');
+      }
+
+      debug('twoway', `contactDeleteHandler: deleting Shopify customer ${shopifyCustomerId} for Bitrix contact ${contactId}`);
+      recordSync('SHOPIFY_TO_BITRIX', 'contact', contactId);
+      await shopifyService.deleteShopifyCustomer(shopifyCustomerId, creds.shopDomain, creds.accessToken, syncId);
+      await deleteMapping('contacts', contactId);
+      await deleteMapping('contacts', shopifyCustomerId);
+      recordSync('BITRIX_TO_SHOPIFY', 'contact', contactId);
+
+      logSyncComplete({ syncId, entity: 'customer_delete', bitrixId: contactId, shopifyId: shopifyCustomerId, duration: Date.now() - startedAt });
+      return res.status(200).send('Deleted in Shopify');
+    } catch (err) {
+      return res.status(err.status || 500).send(err.message);
+    }
+  });
+};
+
+const dealDeleteHandler = async (req, res) => {
+  const syncId = generateSyncId('BTX-SHP-DEAL-DEL');
+  const startedAt = Date.now();
+  return runWithRequestId(syncId, async () => {
+    try {
+      const { id: dealId } = extractBitrixEventData(req, 'ONCRMDEALDELETE');
+      if (!dealId) return res.status(200).send('No deal ID');
+
+      const creds = await resolveShopifyCreds();
+      if (!creds.shopDomain || !creds.accessToken) return res.status(500).send('Shopify credentials missing');
+
+      let shopifyOrderId = await getShopifyIdByBitrixId('deals', dealId);
+      if (!shopifyOrderId) shopifyOrderId = await getMappingWithFallback('deals_reverse', dealId);
+      if (!shopifyOrderId) shopifyOrderId = await getMappingWithFallback('deals', dealId);
+
+      if (!shopifyOrderId) {
+        debug('twoway', `dealDeleteHandler: Bitrix deal ${dealId} was not mapped in Shopify — skipping`);
+        return res.status(200).send('Deal not mapped');
+      }
+
+      debug('twoway', `dealDeleteHandler: canceling/deleting Shopify order ${shopifyOrderId} for Bitrix deal ${dealId}`);
+      recordSync('SHOPIFY_TO_BITRIX', 'deal', dealId);
+      await shopifyService.deleteShopifyOrder(shopifyOrderId, creds.shopDomain, creds.accessToken, syncId);
+      await deleteMapping('deals', dealId);
+      await deleteMapping('deals_reverse', dealId);
+      await deleteMapping('deals', shopifyOrderId);
+      recordSync('BITRIX_TO_SHOPIFY', 'deal', dealId);
+
+      logSyncComplete({ syncId, entity: 'deal_delete', bitrixId: dealId, shopifyId: shopifyOrderId, duration: Date.now() - startedAt });
+      return res.status(200).send('Deleted in Shopify');
+    } catch (err) {
+      return res.status(err.status || 500).send(err.message);
+    }
+  });
+};
+
 const productDeleteHandler = async (req, res) => {
   const syncId = generateSyncId('BTX-SHP-PROD-DEL');
   const startedAt = Date.now();
@@ -749,10 +821,12 @@ const productDeleteHandler = async (req, res) => {
 router.post('/bitrix/contact-update', authorize, contactUpdateHandler);
 router.post('/bitrix/contact-add', authorize, contactUpdateHandler);
 router.post('/bitrix/contact-create', authorize, contactUpdateHandler);
+router.post('/bitrix/contact-delete', authorize, contactDeleteHandler);
 router.post('/bitrix/contact', authorize, contactUpdateHandler);
 router.post('/bitrix/contacts', authorize, contactUpdateHandler);
 router.post('/bitrix/customer-update', authorize, contactUpdateHandler);
 router.post('/bitrix/customer-add', authorize, contactUpdateHandler);
+router.post('/bitrix/customer-delete', authorize, contactDeleteHandler);
 router.post('/bitrix/customer', authorize, contactUpdateHandler);
 router.post('/bitrix/customers', authorize, contactUpdateHandler);
 
@@ -760,10 +834,12 @@ router.post('/bitrix/customers', authorize, contactUpdateHandler);
 router.post('/bitrix/deal-update', authorize, dealUpdateHandler);
 router.post('/bitrix/deal-add', authorize, dealUpdateHandler);
 router.post('/bitrix/deal-create', authorize, dealUpdateHandler);
+router.post('/bitrix/deal-delete', authorize, dealDeleteHandler);
 router.post('/bitrix/deal', authorize, dealUpdateHandler);
 router.post('/bitrix/deals', authorize, dealUpdateHandler);
 router.post('/bitrix/order-update', authorize, dealUpdateHandler);
 router.post('/bitrix/order-add', authorize, dealUpdateHandler);
+router.post('/bitrix/order-delete', authorize, dealDeleteHandler);
 router.post('/bitrix/order', authorize, dealUpdateHandler);
 
 // Product routes (Bitrix -> Shopify)
@@ -777,7 +853,9 @@ router.post('/bitrix/products', authorize, productUpdateHandler);
 // ==================== UNIFIED EVENT DISPATCHER ====================
 const EVENT_HANDLERS = {
   contact: contactUpdateHandler,
+  contact_delete: contactDeleteHandler,
   deal: dealUpdateHandler,
+  deal_delete: dealDeleteHandler,
   product: productUpdateHandler,
   product_delete: productDeleteHandler
 };
@@ -795,14 +873,29 @@ router.post('/bitrix/event', authorize, async (req, res) => {
         return res.status(200).send(`Event ${eventName || 'UNKNOWN'} skipped (no entity ID)`);
       }
 
-      if (eventName.includes('PRODUCT') && (eventName.endsWith('_DELETE') || eventName.includes('DELETE'))) {
+      const isDelete = eventName.endsWith('_DELETE') || eventName.includes('DELETE') || eventName.includes('UNREGISTER');
+
+      // Contact delete
+      if (isDelete && eventName.includes('CONTACT')) {
+        req.body = { ...req.body, event: eventName, data: { FIELDS: { ID: String(id) } } };
+        return await contactDeleteHandler(req, res);
+      }
+
+      // Deal / Order delete
+      if (isDelete && (eventName.includes('DEAL') || eventName.includes('ORDER'))) {
+        req.body = { ...req.body, event: eventName, data: { FIELDS: { ID: String(id) } } };
+        return await dealDeleteHandler(req, res);
+      }
+
+      // Product delete
+      if (isDelete && (eventName.includes('PRODUCT') || eventName.includes('CATALOG'))) {
         req.body = { ...req.body, event: eventName, data: { FIELDS: { ID: String(id) } } };
         return await productDeleteHandler(req, res);
       }
 
-      if (eventName.endsWith('_DELETE') || eventName.includes('DELETE')) {
-        debug('twoway', `event-dispatcher: ${eventName} — delete events ignored`);
-        return res.status(200).send('Delete events ignored');
+      if (isDelete) {
+        debug('twoway', `event-dispatcher: unhandled delete event ${eventName} — skipping`);
+        return res.status(200).send('Delete event skipped');
       }
 
       let kind = null;

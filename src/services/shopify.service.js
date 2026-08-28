@@ -1032,6 +1032,60 @@ const deleteShopifyProduct = async (shopifyProductId, shopDomain, accessToken, s
   }
 };
 
+/**
+ * Cancel and delete an order in Shopify (when deleted in Bitrix24).
+ */
+const deleteShopifyOrder = async (shopifyOrderId, shopDomain, accessToken, syncId = '') => {
+  const cancelEndpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/orders/${shopifyOrderId}/cancel.json`;
+  const deleteEndpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/orders/${shopifyOrderId}.json`;
+
+  logShopifyRequest({
+    syncId,
+    entity: 'order',
+    entityId: shopifyOrderId,
+    operation: 'CANCEL_AND_DELETE',
+    endpoint: deleteEndpoint,
+    method: 'DELETE',
+    payload: {}
+  });
+
+  const startTime = Date.now();
+  try {
+    try {
+      await axios.post(cancelEndpoint, {}, { headers: getAuthHeaders(accessToken) });
+    } catch (cancelErr) {
+      // Ignored if already closed / cancelled
+    }
+    const response = await axios.delete(deleteEndpoint, { headers: getAuthHeaders(accessToken) });
+    const duration = Date.now() - startTime;
+    logShopifyResponse({
+      syncId,
+      entity: 'order',
+      entityId: shopifyOrderId,
+      statusCode: response.status,
+      status: 'SUCCESS',
+      response: response.data,
+      duration
+    });
+    return true;
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    const statusCode = err.response?.status || 500;
+    const responseBody = err.response?.data;
+    logShopifyResponse({
+      syncId,
+      entity: 'order',
+      entityId: shopifyOrderId,
+      statusCode,
+      status: 'FAILED',
+      response: responseBody,
+      duration,
+      error: err.message
+    });
+    return false;
+  }
+};
+
 module.exports = {
   registerWebhooks,
   updateShopifyCustomer,
@@ -1040,6 +1094,7 @@ module.exports = {
   getCustomerOrders,
   updateShopifyOrder,
   createShopifyOrder,
+  deleteShopifyOrder,
   updateShopifyProduct,
   createShopifyProduct,
   deleteShopifyProduct,
