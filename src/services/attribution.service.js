@@ -50,17 +50,24 @@ const extractAttribution = (order) => {
 };
 
 /**
- * Extract discount codes from order.discount_applications.
+ * Extract discount codes from order.discount_codes and order.discount_applications.
  */
 const extractDiscountCodes = (order) => {
   const codes = [];
+  // 1. Check order.discount_codes
+  for (const dc of (order.discount_codes || [])) {
+    const c = typeof dc === 'string' ? dc : (dc.code || dc.title || '');
+    if (c && !codes.includes(c)) codes.push(c);
+  }
+  // 2. Check order.discount_applications
   for (const app of (order.discount_applications || [])) {
-    const c = app.code || app.target_selection || '';
+    const c = app.code || app.title || '';
     if (c && !codes.includes(c)) codes.push(c);
   }
   const joined = codes.join(', ');
-  debug('attribution', `extractDiscountCodes: order ${order.id} -> ${(order.discount_applications || []).length} application(s), codes="${joined || '(none)'}"`);
+  debug('attribution', `extractDiscountCodes: order ${order.id} -> codes="${joined || '(none)'}"`);
   return joined;
 };
 
 module.exports = { parseUtmFromUrl, extractAttribution, extractDiscountCodes, channelName };
+

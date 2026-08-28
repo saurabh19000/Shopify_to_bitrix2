@@ -129,4 +129,4 @@ const syncInvoice = async (order, dealId, opts) => {
   return { invoiceId };
 };
 
-module.exports = { syncInvoice, attachFilesToDeal };
+module.exports = { syncInvoice, attachFilesToDeal, buildInvoiceFields };

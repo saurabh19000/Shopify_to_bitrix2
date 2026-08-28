@@ -182,4 +182,4 @@ const syncLeadFromCheckout = async (checkout, opts) => {
   }
 };
 
-module.exports = { syncLeadFromCart, syncLeadFromCheckout, ensureContactForLead };
+module.exports = { syncLeadFromCart, syncLeadFromCheckout, ensureContactForLead, toContact, formatLineItems };
