@@ -100,11 +100,16 @@ app.post('/webhooks/shopify/customers-delete', webhookHandler(async ({ id }) => 
 
 const handleProductWebhook = async (product, store) => {
   debug('app', `products webhook: syncing product ${product.id} "${product.title}"`);
+  if (isEchoLoop('BITRIX_TO_SHOPIFY', 'product', product.id)) {
+    debug('app', `products webhook: echo loop suppressed for Shopify product ${product.id}`);
+    return;
+  }
   const bitrixProductId = await bitrixService.createOrUpdateProduct(
     product, store.shopDomain, store.accessToken, store.apiVersion
   );
   if (bitrixProductId) {
     recordSync('SHOPIFY_TO_BITRIX', 'product', bitrixProductId);
+    recordSync('SHOPIFY_TO_BITRIX', 'product', product.id);
     const variant = (product.variants && product.variants[0]) || {};
     const qty = variant.inventory_quantity !== undefined ? Math.max(variant.inventory_quantity, 0) : 0;
     debug('app', `products webhook: product ${product.id} -> Bitrix ${bitrixProductId}; queueing stock sync in 3s with qty=${qty}`);

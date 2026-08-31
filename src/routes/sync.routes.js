@@ -669,10 +669,10 @@ const productUpdateHandler = async (req, res) => {
         shopifyProductId = await getMappingWithFallback('products', product.PRODUCT_ID || productId);
       }
       if (!shopifyProductId && product.NAME) {
-        const existingByName = await shopifyService.findShopifyProductByTitle(product.NAME, creds.shopDomain, creds.accessToken);
+        const existingByName = await shopifyService.findShopifyProductByTitle(product.NAME.trim(), creds.shopDomain, creds.accessToken);
         if (existingByName) {
           shopifyProductId = existingByName.id;
-          await setMapping('products', String(productId), String(shopifyProductId));
+          await setMapping('products', String(shopifyProductId), String(productId));
           console.log(`🔗 Matched existing Shopify product by title "${product.NAME}" -> ID: ${shopifyProductId}`);
         }
       }
@@ -714,6 +714,7 @@ const productUpdateHandler = async (req, res) => {
         try {
           const updated = await shopifyService.updateShopifyProduct(shopifyProductId, updateFields, creds.shopDomain, creds.accessToken, syncId);
           recordSync('BITRIX_TO_SHOPIFY', 'product', productId);
+          recordSync('BITRIX_TO_SHOPIFY', 'product', shopifyProductId);
           console.log(`✅ [SUCCESS] Updated Shopify Product ${shopifyProductId} | Attached Images: ${updated?.images?.length || 0}`);
           logSyncComplete({ syncId, entity: 'product', bitrixId: productId, shopifyId: shopifyProductId, duration: Date.now() - startedAt });
           return res.status(200).send('OK');
@@ -739,8 +740,9 @@ const productUpdateHandler = async (req, res) => {
 
       const newProduct = await shopifyService.createShopifyProduct(product, creds.shopDomain, creds.accessToken, syncId);
       if (newProduct) {
-        await setMapping('products', String(productId), String(newProduct.id));
+        await setMapping('products', String(newProduct.id), String(productId));
         recordSync('BITRIX_TO_SHOPIFY', 'product', productId);
+        recordSync('BITRIX_TO_SHOPIFY', 'product', newProduct.id);
         console.log(`✅ [SUCCESS] Created Shopify Product ID: ${newProduct.id} ("${newProduct.title}") | Attached Images: ${newProduct.images?.length || 0}`);
         logMappingSave({ syncId, entity: 'product', bitrixId: productId, shopifyId: newProduct.id, status: 'SUCCESS' });
         logSyncComplete({ syncId, entity: 'product', bitrixId: productId, shopifyId: newProduct.id, duration: Date.now() - startedAt });
