@@ -357,51 +357,59 @@ const getProduct = async (bitrixProductId) => {
   return data?.result || null;
 };
 
-const getProductImages = async (bitrixProductId) => {
+const getProductImages = async (bitrixProductId, allowRetry = true) => {
   if (!bitrixProductId || String(bitrixProductId) === '0' || String(bitrixProductId) === 'null') return [];
-  const urls = [];
   const { bitrixWebhookUrl } = getTenantConfig();
   const portalUrl = bitrixWebhookUrl ? bitrixWebhookUrl.split('/rest/')[0] : '';
 
-  try {
-    const imgList = await bitrixRequest('catalog.productImage.list', { productId: bitrixProductId });
-    const productImages = imgList?.result?.productImages || [];
-    for (const img of productImages) {
-      let u = img.detailUrl || img.downloadUrl;
-      if (u) {
-        if (!u.startsWith('http') && portalUrl) {
-          u = portalUrl + (u.startsWith('/') ? u : '/' + u);
-        }
-        if (!urls.includes(u)) {
-          urls.push(u);
-        }
-      }
-    }
-  } catch (err) {
-    debug('bitrix', `getProductImages: catalog.productImage.list failed for ${bitrixProductId} (${err.message})`);
-  }
-
-  // Fallback to checking crm.product.get DETAIL_PICTURE / PREVIEW_PICTURE if catalog.productImage.list returned nothing
-  if (urls.length === 0) {
+  const attemptFetch = async () => {
+    const list = [];
     try {
-      const prod = await getProduct(bitrixProductId);
-      const pics = [prod?.DETAIL_PICTURE, prod?.PREVIEW_PICTURE].filter(Boolean);
-      for (const pic of pics) {
-        let u = typeof pic === 'string' ? pic : (pic.detailUrl || pic.showUrl || pic.downloadUrl || pic.src);
+      const imgList = await bitrixRequest('catalog.productImage.list', { productId: bitrixProductId });
+      const productImages = imgList?.result?.productImages || [];
+      for (const img of productImages) {
+        let u = img.detailUrl || img.downloadUrl;
         if (u) {
           if (!u.startsWith('http') && portalUrl) {
             u = portalUrl + (u.startsWith('/') ? u : '/' + u);
           }
-          if (!urls.includes(u)) urls.push(u);
+          if (!list.includes(u)) {
+            list.push(u);
+          }
         }
       }
     } catch (err) {
-      debug('bitrix', `getProductImages: fallback check failed for ${bitrixProductId} (${err.message})`);
+      debug('bitrix', `getProductImages: catalog.productImage.list failed for ${bitrixProductId} (${err.message})`);
     }
+
+    if (list.length === 0) {
+      try {
+        const prod = await getProduct(bitrixProductId);
+        const pics = [prod?.DETAIL_PICTURE, prod?.PREVIEW_PICTURE].filter(Boolean);
+        for (const pic of pics) {
+          let u = typeof pic === 'string' ? pic : (pic.detailUrl || pic.showUrl || pic.downloadUrl || pic.src);
+          if (u) {
+            if (!u.startsWith('http') && portalUrl) {
+              u = portalUrl + (u.startsWith('/') ? u : '/' + u);
+            }
+            if (!list.includes(u)) list.push(u);
+          }
+        }
+      } catch (err) {
+        debug('bitrix', `getProductImages: fallback check failed for ${bitrixProductId} (${err.message})`);
+      }
+    }
+    return list;
+  };
+
+  let results = await attemptFetch();
+  if (results.length === 0 && allowRetry) {
+    await sleep(1500);
+    results = await attemptFetch();
   }
 
-  debug('bitrix', `getProductImages: found ${urls.length} image(s) for Bitrix product ${bitrixProductId}`, { urls });
-  return urls;
+  debug('bitrix', `getProductImages: found ${results.length} image(s) for Bitrix product ${bitrixProductId}`, { urls: results });
+  return results;
 };
 
 const findProductByName = async (name) => {
