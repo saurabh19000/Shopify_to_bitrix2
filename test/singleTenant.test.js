@@ -66,6 +66,9 @@ const createFakePortal = () => {
           result = ++seq;
           if (payload.fields && payload.fields.TITLE) dealsByTitle.set(payload.fields.TITLE, result);
           break;
+        case 'crm.deal.get':
+          result = { ID: payload.id, TITLE: 'Order #5001' };
+          break;
         case 'crm.deal.update':
           result = payload.id || ++seq;
           break;

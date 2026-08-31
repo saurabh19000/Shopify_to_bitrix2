@@ -1136,6 +1136,48 @@ const createShopifyOrder = async (orderPayload, shopDomain, accessToken, syncId 
 };
 
 /**
+ * Find an existing Shopify order by its name/number (e.g. "#1001", "1001", or "Order #1001").
+ */
+const findShopifyOrderByNumber = async (orderNumber, shopDomain, accessToken, syncId = '') => {
+  if (!orderNumber) return null;
+  const cleanNum = String(orderNumber).replace(/^[^\d]*/, '').trim();
+  if (!cleanNum) return null;
+
+  const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/orders.json?name=%23${cleanNum}&status=any`;
+  logShopifyRequest({
+    syncId,
+    entity: 'order',
+    entityId: `LOOKUP_#${cleanNum}`,
+    operation: 'GET',
+    endpoint,
+    method: 'GET',
+    payload: {}
+  });
+
+  const startTime = Date.now();
+  try {
+    const response = await axios.get(endpoint, { headers: getAuthHeaders(accessToken) });
+    const orders = response.data?.orders || [];
+    const duration = Date.now() - startTime;
+    logShopifyResponse({
+      syncId,
+      entity: 'order',
+      entityId: `LOOKUP_#${cleanNum}`,
+      statusCode: response.status,
+      status: 'SUCCESS',
+      response: { foundCount: orders.length },
+      duration
+    });
+    if (orders.length > 0) {
+      return orders[0];
+    }
+  } catch (err) {
+    debug('shopify', `findShopifyOrderByNumber: lookup #${cleanNum} failed (${err.message})`);
+  }
+  return null;
+};
+
+/**
  * Delete a product in Shopify (when deleted in Bitrix24).
  */
 const deleteShopifyProduct = async (shopifyProductId, shopDomain, accessToken, syncId = '') => {
@@ -1254,6 +1296,7 @@ module.exports = {
   findShopifyProductByTitle,
   createShopifyCustomer,
   createShopifyDraftOrder,
-  completeShopifyDraftOrder
+  completeShopifyDraftOrder,
+  findShopifyOrderByNumber
 };
 

@@ -407,13 +407,22 @@ const dealUpdateHandler = async (req, res) => {
         }
       }
 
-      // If deal title is already "Order #3715", extract order number and suppress duplicate creation
+      // Check if deal references an existing Shopify order by number (e.g. "Order #1001", "#1001")
       if (!shopifyOrderId && deal.TITLE) {
-        const orderNumMatch = deal.TITLE.match(/^Order\s*#?(\d+)/i);
+        const orderNumMatch = deal.TITLE.match(/(?:Order\s*#?|#)(\d+)/i);
         if (orderNumMatch && orderNumMatch[1]) {
-          debug('twoway', `dealUpdateHandler: deal ${dealId} has Shopify order title "${deal.TITLE}" — suppressing duplicate order creation`);
-          recordSync('BITRIX_TO_SHOPIFY', 'deal', dealId);
-          return res.status(200).send('Deal already originated from Shopify order — duplicate creation suppressed');
+          const matchedOrder = await shopifyService.findShopifyOrderByNumber(
+            orderNumMatch[1],
+            creds.shopDomain,
+            creds.accessToken,
+            syncId
+          );
+          if (matchedOrder && matchedOrder.id) {
+            shopifyOrderId = String(matchedOrder.id);
+            await setMapping('deals_reverse', String(dealId), shopifyOrderId);
+            await setMapping('deals', shopifyOrderId, String(dealId));
+            debug('twoway', `dealUpdateHandler: matched Bitrix deal ${dealId} ("${deal.TITLE}") to existing Shopify order #${matchedOrder.order_number || orderNumMatch[1]} (id=${shopifyOrderId}) — proceeding to update existing order`);
+          }
         }
       }
 

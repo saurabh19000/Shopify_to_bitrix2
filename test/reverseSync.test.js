@@ -164,6 +164,8 @@ const fakeShopify = async (method, url, body) => {
   } else if (method === 'put' && /\/products\/\d+\.json$/.test(path)) {
     const pid = path.match(/(\d+)\.json$/)[1];
     data = { product: { ...body.product, id: Number(pid) } };
+  } else if (method === 'get' && path.includes('/orders.json')) {
+    data = { orders: [] };
   } else if (method === 'post' && path.endsWith('/orders.json')) {
     data = { order: { ...body.order, id: 9001 } };
   } else if (method === 'post' && path.endsWith('/draft_orders.json')) {
