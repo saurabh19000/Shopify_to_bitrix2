@@ -362,6 +362,38 @@ const updateShopifyOrder = async (shopifyOrderId, fields, shopDomain, accessToke
 };
 
 /**
+ * Helper to prepare Shopify images (supports direct public CDN URLs and base64 attachments for portal URLs).
+ */
+const prepareShopifyImages = async (images) => {
+  if (!images) return [];
+  const list = Array.isArray(images) ? images : [images];
+  const out = [];
+  for (const img of list) {
+    if (!img) continue;
+    if (typeof img === 'object' && (img.attachment || (img.src && !img.detailUrl))) {
+      out.push(img);
+      continue;
+    }
+    const rawUrl = typeof img === 'string' ? img : (img.detailUrl || img.downloadUrl || img.showUrl || img.src);
+    if (!rawUrl) continue;
+
+    if (rawUrl.startsWith('https://cdn.bitrix24.') || rawUrl.startsWith('https://cdn.shopify.com/')) {
+      out.push({ src: rawUrl });
+    } else {
+      try {
+        const res = await axios.get(rawUrl, { responseType: 'arraybuffer', timeout: 25000 });
+        const base64 = Buffer.from(res.data, 'binary').toString('base64');
+        const filename = rawUrl.split('/').pop().split('?')[0] || 'product_image.jpg';
+        out.push({ attachment: base64, filename });
+      } catch (e) {
+        out.push({ src: rawUrl });
+      }
+    }
+  }
+  return out;
+};
+
+/**
  * Push updated product fields from Bitrix product back to Shopify.
  */
 const updateShopifyProduct = async (shopifyProductId, fields, shopDomain, accessToken, syncId = '') => {
@@ -373,7 +405,7 @@ const updateShopifyProduct = async (shopifyProductId, fields, shopDomain, access
   if (fields.tags !== undefined) product.tags = fields.tags || '';
   if (fields.status !== undefined) product.status = fields.status;
   if (fields.images && Array.isArray(fields.images) && fields.images.length > 0) {
-    product.images = fields.images.map(img => (typeof img === 'string' ? { src: img } : img));
+    product.images = await prepareShopifyImages(fields.images);
   }
 
   if (fields.variants && fields.variants.length > 0) {
@@ -731,13 +763,12 @@ const createShopifyProduct = async (product, shopDomain, accessToken, syncId = '
   };
 
   // Attach images if provided
-  const images = product.images || (product.image ? [product.image] : []);
-  if (Array.isArray(images) && images.length > 0) {
-    payload.product.images = images.map(img => (typeof img === 'string' ? { src: img } : img));
+  const rawImages = product.images || (product.image ? [product.image] : []);
+  if (Array.isArray(rawImages) && rawImages.length > 0) {
+    payload.product.images = await prepareShopifyImages(rawImages);
   } else if (product.DETAIL_PICTURE || product.PREVIEW_PICTURE) {
     const pic = product.DETAIL_PICTURE || product.PREVIEW_PICTURE;
-    const url = typeof pic === 'string' ? pic : (pic.detailUrl || pic.showUrl || pic.downloadUrl || pic.src);
-    if (url) payload.product.images = [{ src: url }];
+    payload.product.images = await prepareShopifyImages([pic]);
   }
 
   const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/products.json`;

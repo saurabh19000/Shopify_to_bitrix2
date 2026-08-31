@@ -360,13 +360,21 @@ const getProduct = async (bitrixProductId) => {
 const getProductImages = async (bitrixProductId) => {
   if (!bitrixProductId || String(bitrixProductId) === '0' || String(bitrixProductId) === 'null') return [];
   const urls = [];
+  const { bitrixWebhookUrl } = getTenantConfig();
+  const portalUrl = bitrixWebhookUrl ? bitrixWebhookUrl.split('/rest/')[0] : '';
+
   try {
     const imgList = await bitrixRequest('catalog.productImage.list', { productId: bitrixProductId });
     const productImages = imgList?.result?.productImages || [];
     for (const img of productImages) {
-      const u = img.detailUrl || img.downloadUrl;
-      if (u && !urls.includes(u)) {
-        urls.push(u);
+      let u = img.detailUrl || img.downloadUrl;
+      if (u) {
+        if (!u.startsWith('http') && portalUrl) {
+          u = portalUrl + (u.startsWith('/') ? u : '/' + u);
+        }
+        if (!urls.includes(u)) {
+          urls.push(u);
+        }
       }
     }
   } catch (err) {
@@ -377,14 +385,12 @@ const getProductImages = async (bitrixProductId) => {
   if (urls.length === 0) {
     try {
       const prod = await getProduct(bitrixProductId);
-      const pic = prod?.DETAIL_PICTURE || prod?.PREVIEW_PICTURE;
-      if (pic) {
+      const pics = [prod?.DETAIL_PICTURE, prod?.PREVIEW_PICTURE].filter(Boolean);
+      for (const pic of pics) {
         let u = typeof pic === 'string' ? pic : (pic.detailUrl || pic.showUrl || pic.downloadUrl || pic.src);
         if (u) {
-          if (!u.startsWith('http')) {
-            const { bitrixWebhookUrl } = getTenantConfig();
-            const portalUrl = bitrixWebhookUrl ? bitrixWebhookUrl.split('/rest/')[0] : '';
-            if (portalUrl) u = portalUrl + (u.startsWith('/') ? u : '/' + u);
+          if (!u.startsWith('http') && portalUrl) {
+            u = portalUrl + (u.startsWith('/') ? u : '/' + u);
           }
           if (!urls.includes(u)) urls.push(u);
         }
