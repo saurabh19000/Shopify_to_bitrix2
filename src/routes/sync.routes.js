@@ -608,6 +608,12 @@ const productUpdateHandler = async (req, res) => {
         return res.status(404).send(`Product ${productId} not found`);
       }
 
+      // Fetch Product Images from Bitrix
+      const images = await bitrixService.getProductImages(productId);
+      if (images && images.length > 0) {
+        product.images = images;
+      }
+
       // Stage 3: Data Validation
       logValidation({
         syncId,
@@ -615,7 +621,7 @@ const productUpdateHandler = async (req, res) => {
         entityId: productId,
         status: 'SUCCESS',
         requiredFields: 'id, name, price',
-        details: { name: product.NAME, price: product.PRICE, code: product.CODE }
+        details: { name: product.NAME, price: product.PRICE, code: product.CODE, imageCount: images ? images.length : 0 }
       });
 
       const creds = await resolveShopifyCreds();
@@ -640,6 +646,9 @@ const productUpdateHandler = async (req, res) => {
         if (product.VENDOR !== undefined) updateFields.vendor = product.VENDOR;
         if (product.PRICE !== undefined) {
           updateFields.variants = [{ price: parseFloat(product.PRICE) }];
+        }
+        if (product.images && product.images.length > 0) {
+          updateFields.images = product.images.map(img => (typeof img === 'string' ? { src: img } : img));
         }
 
         if (Object.keys(updateFields).length === 0) {

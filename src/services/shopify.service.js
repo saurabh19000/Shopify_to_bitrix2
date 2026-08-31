@@ -372,6 +372,9 @@ const updateShopifyProduct = async (shopifyProductId, fields, shopDomain, access
   if (fields.product_type !== undefined) product.product_type = fields.product_type;
   if (fields.tags !== undefined) product.tags = fields.tags || '';
   if (fields.status !== undefined) product.status = fields.status;
+  if (fields.images && Array.isArray(fields.images) && fields.images.length > 0) {
+    product.images = fields.images.map(img => (typeof img === 'string' ? { src: img } : img));
+  }
 
   if (fields.variants && fields.variants.length > 0) {
     let variants = fields.variants;
@@ -726,6 +729,16 @@ const createShopifyProduct = async (product, shopDomain, accessToken, syncId = '
       }]
     }
   };
+
+  // Attach images if provided
+  const images = product.images || (product.image ? [product.image] : []);
+  if (Array.isArray(images) && images.length > 0) {
+    payload.product.images = images.map(img => (typeof img === 'string' ? { src: img } : img));
+  } else if (product.DETAIL_PICTURE || product.PREVIEW_PICTURE) {
+    const pic = product.DETAIL_PICTURE || product.PREVIEW_PICTURE;
+    const url = typeof pic === 'string' ? pic : (pic.detailUrl || pic.showUrl || pic.downloadUrl || pic.src);
+    if (url) payload.product.images = [{ src: url }];
+  }
 
   const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/products.json`;
   logShopifyRequest({

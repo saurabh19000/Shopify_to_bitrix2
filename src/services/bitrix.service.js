@@ -357,6 +357,47 @@ const getProduct = async (bitrixProductId) => {
   return data?.result || null;
 };
 
+const getProductImages = async (bitrixProductId) => {
+  if (!bitrixProductId || String(bitrixProductId) === '0' || String(bitrixProductId) === 'null') return [];
+  const urls = [];
+  try {
+    const imgList = await bitrixRequest('catalog.productImage.list', { productId: bitrixProductId });
+    const productImages = imgList?.result?.productImages || [];
+    for (const img of productImages) {
+      const u = img.detailUrl || img.downloadUrl;
+      if (u && !urls.includes(u)) {
+        urls.push(u);
+      }
+    }
+  } catch (err) {
+    debug('bitrix', `getProductImages: catalog.productImage.list failed for ${bitrixProductId} (${err.message})`);
+  }
+
+  // Fallback to checking crm.product.get DETAIL_PICTURE / PREVIEW_PICTURE if catalog.productImage.list returned nothing
+  if (urls.length === 0) {
+    try {
+      const prod = await getProduct(bitrixProductId);
+      const pic = prod?.DETAIL_PICTURE || prod?.PREVIEW_PICTURE;
+      if (pic) {
+        let u = typeof pic === 'string' ? pic : (pic.detailUrl || pic.showUrl || pic.downloadUrl || pic.src);
+        if (u) {
+          if (!u.startsWith('http')) {
+            const { bitrixWebhookUrl } = getTenantConfig();
+            const portalUrl = bitrixWebhookUrl ? bitrixWebhookUrl.split('/rest/')[0] : '';
+            if (portalUrl) u = portalUrl + (u.startsWith('/') ? u : '/' + u);
+          }
+          if (!urls.includes(u)) urls.push(u);
+        }
+      }
+    } catch (err) {
+      debug('bitrix', `getProductImages: fallback check failed for ${bitrixProductId} (${err.message})`);
+    }
+  }
+
+  debug('bitrix', `getProductImages: found ${urls.length} image(s) for Bitrix product ${bitrixProductId}`, { urls });
+  return urls;
+};
+
 const findProductByName = async (name) => {
   const data = await bitrixRequest('crm.product.list', {
     filter: { "NAME": name },
@@ -881,6 +922,7 @@ module.exports = {
   getDeal,
   getDealProductRows,
   getProduct,
+  getProductImages,
   findProductByName,
   findProductById,
   findDealByOrderNumber,
