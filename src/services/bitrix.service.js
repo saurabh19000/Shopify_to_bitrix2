@@ -702,7 +702,19 @@ const createProduct = async (product, shopDomain, accessToken, apiVersion) => {
 
   if (productId) {
     debug('bitrix', `createProduct: UPDATING existing Bitrix product ${productId}`);
-    await bitrixRequest('crm.product.update', { id: productId, fields });
+    try {
+      await bitrixRequest('crm.product.update', { id: productId, fields });
+    } catch (err) {
+      const errMsg = err.responseBody?.error_description || err.response?.data?.error_description || err.message || '';
+      if (errMsg.includes('Product is not found') || errMsg.includes('not found') || err.response?.status === 400) {
+        debug('bitrix', `createProduct: Bitrix product ${productId} was removed in Bitrix — creating fresh product instead`);
+        console.warn(`⚠️ Bitrix product ${productId} no longer exists in Bitrix — creating fresh product`);
+        const data = await bitrixRequest('crm.product.add', { fields });
+        productId = data?.result;
+      } else {
+        throw err;
+      }
+    }
   } else {
     debug('bitrix', `createProduct: CREATING new Bitrix product`, { fieldKeys: Object.keys(fields) });
     const data = await bitrixRequest('crm.product.add', { fields });
@@ -989,20 +1001,32 @@ const deleteDealByOrderNumber = async (orderNumber) => {
 
 const deleteContactById = async (bitrixId) => {
   debug('bitrix', `deleteContactById: ${bitrixId}`);
-  await bitrixRequest('crm.contact.delete', { id: bitrixId });
-  console.log(`Deleted contact ${bitrixId}`);
+  try {
+    await bitrixRequest('crm.contact.delete', { id: bitrixId });
+    console.log(`Deleted contact ${bitrixId}`);
+  } catch (err) {
+    console.warn(`[Bitrix] deleteContactById warning for ${bitrixId}: ${err.message}`);
+  }
 };
 
 const deleteProductById = async (bitrixId) => {
   debug('bitrix', `deleteProductById: ${bitrixId}`);
-  await bitrixRequest('crm.product.delete', { id: bitrixId });
-  console.log(`Deleted product ${bitrixId}`);
+  try {
+    await bitrixRequest('crm.product.delete', { id: bitrixId });
+    console.log(`Deleted product ${bitrixId}`);
+  } catch (err) {
+    console.warn(`[Bitrix] deleteProductById warning for ${bitrixId}: ${err.message}`);
+  }
 };
 
 const deleteDealById = async (bitrixId) => {
   debug('bitrix', `deleteDealById: ${bitrixId}`);
-  await bitrixRequest('crm.deal.delete', { id: bitrixId });
-  console.log(`Deleted deal ${bitrixId}`);
+  try {
+    await bitrixRequest('crm.deal.delete', { id: bitrixId });
+    console.log(`Deleted deal ${bitrixId}`);
+  } catch (err) {
+    console.warn(`[Bitrix] deleteDealById warning for ${bitrixId}: ${err.message}`);
+  }
 };
 
 module.exports = {
