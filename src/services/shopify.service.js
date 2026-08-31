@@ -370,8 +370,16 @@ const prepareShopifyImages = async (images) => {
   const out = [];
   for (const img of list) {
     if (!img) continue;
-    if (typeof img === 'object' && (img.attachment || (img.src && !img.detailUrl))) {
+    if (typeof img === 'object' && img.attachment) {
       out.push(img);
+      continue;
+    }
+    if (typeof img === 'object' && img.src && !img.detailUrl) {
+      try {
+        out.push({ ...img, src: encodeURI(decodeURI(img.src)) });
+      } catch {
+        out.push(img);
+      }
       continue;
     }
     const rawUrl = typeof img === 'string' ? img : (img.detailUrl || img.src);
@@ -383,7 +391,11 @@ const prepareShopifyImages = async (images) => {
     }
 
     if (rawUrl.startsWith('https://cdn.bitrix24.') || rawUrl.startsWith('https://cdn.shopify.com/') || rawUrl.startsWith('http')) {
-      out.push({ src: rawUrl });
+      try {
+        out.push({ src: encodeURI(decodeURI(rawUrl)) });
+      } catch {
+        out.push({ src: rawUrl });
+      }
     }
   }
   return out;
@@ -395,7 +407,13 @@ const prepareShopifyImages = async (images) => {
 const uploadShopifyProductImage = async (shopifyProductId, imageObj, shopDomain, accessToken) => {
   try {
     const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/products/${shopifyProductId}/images.json`;
-    const res = await axios.post(endpoint, { image: imageObj }, { headers: getAuthHeaders(accessToken) });
+    const cleanImg = typeof imageObj === 'string'
+      ? { src: encodeURI(decodeURI(imageObj)) }
+      : {
+          ...imageObj,
+          src: imageObj.src ? encodeURI(decodeURI(imageObj.src)) : undefined
+        };
+    const res = await axios.post(endpoint, { image: cleanImg }, { headers: getAuthHeaders(accessToken) });
     return res.data?.image;
   } catch (err) {
     debug('shopify', `uploadShopifyProductImage: direct upload failed for product ${shopifyProductId} (${err.message})`);
@@ -848,6 +866,42 @@ const createShopifyProduct = async (product, shopDomain, accessToken, syncId = '
     }
     return createdProduct;
   } catch (err) {
+    // If Shopify rejected the image URL (e.g. 422 Image URL is invalid), retry creating the product without images so the product is never dropped!
+    if (payload.product.images?.length > 0 && err.response?.status === 422) {
+      debug('shopify', `createShopifyProduct: image URL rejected by Shopify — creating product without images first and retrying images...`);
+      const fallbackPayload = {
+        product: {
+          ...payload.product,
+          images: []
+        }
+      };
+      try {
+        const retryRes = await axios.post(endpoint, fallbackPayload, { headers: getAuthHeaders(accessToken) });
+        const duration = Date.now() - startTime;
+        logShopifyResponse({
+          syncId,
+          entity: 'product',
+          entityId: retryRes.data.product?.id,
+          statusCode: retryRes.status,
+          status: 'SUCCESS',
+          response: retryRes.data,
+          duration
+        });
+        const createdProduct = retryRes.data.product;
+        // Attempt to upload images individually
+        for (const img of payload.product.images) {
+          const uploadedImg = await uploadShopifyProductImage(createdProduct.id, img, shopDomain, accessToken);
+          if (uploadedImg) {
+            if (!createdProduct.images) createdProduct.images = [];
+            createdProduct.images.push(uploadedImg);
+          }
+        }
+        return createdProduct;
+      } catch (retryErr) {
+        // Continue to standard throw below
+      }
+    }
+
     const duration = Date.now() - startTime;
     const statusCode = err.response?.status || 500;
     const responseBody = err.response?.data;
