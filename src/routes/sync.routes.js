@@ -398,9 +398,22 @@ const dealUpdateHandler = async (req, res) => {
       // Check if this deal was already mapped to a Shopify order
       let shopifyOrderId = await getMappingWithFallback('deals_reverse', dealId);
       if (!shopifyOrderId) {
+        shopifyOrderId = await getMappingWithFallback('deals', dealId);
+      }
+      if (!shopifyOrderId) {
         shopifyOrderId = await getShopifyIdByBitrixId('deals', dealId);
         if (shopifyOrderId) {
           debug('twoway', `dealUpdateHandler: resolved shopifyOrderId=${shopifyOrderId} from id_map for deal ${dealId}`);
+        }
+      }
+
+      // If deal title is already "Order #3715", extract order number and suppress duplicate creation
+      if (!shopifyOrderId && deal.TITLE) {
+        const orderNumMatch = deal.TITLE.match(/^Order\s*#?(\d+)/i);
+        if (orderNumMatch && orderNumMatch[1]) {
+          debug('twoway', `dealUpdateHandler: deal ${dealId} has Shopify order title "${deal.TITLE}" — suppressing duplicate order creation`);
+          recordSync('BITRIX_TO_SHOPIFY', 'deal', dealId);
+          return res.status(200).send('Deal already originated from Shopify order — duplicate creation suppressed');
         }
       }
 

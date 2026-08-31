@@ -755,14 +755,43 @@ const createDeal = async (order, opts = {}) => {
     fields.CONTACT_ID = contactId;
   }
 
-  const existingDeal = await findDealByOrderNumber(orderNumber);
+  let existingDeal = null;
+
+  // 1. Check ID mapping in DB/memory
+  const mappedDealId = await getMappingWithFallback('deals', order.id);
+  if (mappedDealId) {
+    const d = await getDeal(mappedDealId);
+    if (d) existingDeal = d;
+  }
+
+  // 2. Check if the order originated from a Bitrix deal via tag or note (e.g. "Deal_1579" or "Deal #1579")
+  if (!existingDeal) {
+    const dealTagMatch = (order.tags || '').match(/Deal_(\d+)/i) || (order.note || '').match(/Deal\s*#?(\d+)/i);
+    if (dealTagMatch && dealTagMatch[1]) {
+      const d = await getDeal(dealTagMatch[1]);
+      if (d) {
+        existingDeal = d;
+        debug('bitrix', `createDeal: resolved existing source deal ${d.ID} from order tags/note (${order.tags || order.note})`);
+      }
+    }
+  }
+
+  // 3. Check by Order Number title (e.g. "Order #3714")
+  if (!existingDeal) {
+    existingDeal = await findDealByOrderNumber(orderNumber);
+  }
+
   let dealId;
   let isNew = false;
 
   if (existingDeal) {
     dealId = existingDeal.ID;
-    debug('bitrix', `createDeal: UPDATING existing deal ${dealId} (found by title "${title}")`);
-    await bitrixRequest('crm.deal.update', { id: dealId, fields });
+    debug('bitrix', `createDeal: UPDATING existing deal ${dealId} (found match)`);
+    const updateFields = { ...fields };
+    if (existingDeal.TITLE && !existingDeal.TITLE.startsWith('Order #')) {
+      delete updateFields.TITLE;
+    }
+    await bitrixRequest('crm.deal.update', { id: dealId, fields: updateFields });
   } else {
     debug('bitrix', `createDeal: CREATING new deal "${title}"`);
     const data = await bitrixRequest('crm.deal.add', { fields });
@@ -810,7 +839,9 @@ const createDeal = async (order, opts = {}) => {
 
   await setMapping('deals', order.id, dealId);
   await setMapping('deals_reverse', String(dealId), String(order.id));
-  debug('bitrix', `createDeal: DONE dealId=${dealId}, mappings saved (deals + deals_reverse)`);
+  const { recordSync } = require('../utils/syncTracker');
+  recordSync('SHOPIFY_TO_BITRIX', 'deal', dealId);
+  debug('bitrix', `createDeal: DONE dealId=${dealId}, mappings saved (deals + deals_reverse), sync locked`);
   return dealId;
 };
 
