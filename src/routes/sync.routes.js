@@ -468,6 +468,11 @@ const dealUpdateHandler = async (req, res) => {
           billingAddress = addr;
         }
 
+        // Determine whether Deal came from Online or Offline
+        const sourceVal = String(deal.SOURCE_ID || deal.UF_CRM_LEAD_SOURCE || '').toUpperCase();
+        const isOnline = sourceVal.includes('WEB') || sourceVal.includes('ONLINE') || sourceVal.includes('SHOPIFY');
+        const channelLabel = isOnline ? 'Online' : 'Offline';
+
         // Stage 4: Create Real Order (or Draft Order) in Shopify
         let createdOrder = null;
         try {
@@ -475,8 +480,13 @@ const dealUpdateHandler = async (req, res) => {
             line_items: lineItems,
             financial_status: deal.STAGE_ID === 'WON' ? 'paid' : (deal.UF_CRM_FINANCIAL_STATUS || 'pending'),
             fulfillment_status: deal.UF_CRM_FULFILLMENT_STATUS || null,
-            note: deal.COMMENTS || `Created from Bitrix Deal #${dealId}: ${deal.TITLE}`,
-            tags: `BitrixSync, Deal_${dealId}`
+            note: deal.COMMENTS ? `${deal.COMMENTS}\n[Source: ${channelLabel}]` : `Source: ${channelLabel} (Bitrix Deal #${dealId}: ${deal.TITLE || ''})`,
+            tags: `BitrixSync, Deal_${dealId}, ${channelLabel}, Source: ${channelLabel}`,
+            note_attributes: [
+              { name: 'Source', value: channelLabel },
+              { name: 'Channel', value: channelLabel },
+              { name: 'BitrixDealId', value: String(dealId) }
+            ]
           };
           if (customerRef?.id) orderPayload.customer = { id: Number(customerRef.id) };
           if (contact?.EMAIL?.[0]?.VALUE) orderPayload.email = contact.EMAIL[0].VALUE;
@@ -501,7 +511,13 @@ const dealUpdateHandler = async (req, res) => {
         const draft = await shopifyService.createShopifyDraftOrder({
           lineItems,
           customerId: customerRef ? Number(customerRef.id) : null,
-          note: deal.COMMENTS || '',
+          note: deal.COMMENTS ? `${deal.COMMENTS}\n[Source: ${channelLabel}]` : `Source: ${channelLabel} (Bitrix Deal #${dealId})`,
+          tags: `BitrixSync, Deal_${dealId}, ${channelLabel}, Source: ${channelLabel}`,
+          noteAttributes: [
+            { name: 'Source', value: channelLabel },
+            { name: 'Channel', value: channelLabel },
+            { name: 'BitrixDealId', value: String(dealId) }
+          ],
           email: contact && contact.EMAIL && contact.EMAIL[0] ? contact.EMAIL[0].VALUE : '',
           shippingAddress,
           billingAddress

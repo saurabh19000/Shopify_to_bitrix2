@@ -101,12 +101,14 @@ const syncLeadFromCart = async (cart, opts) => {
   debug('lead', `syncLeadFromCart: building lead fields`, { contactId, utm_source: att.utm_source, total: cart.total_price });
 
   const fields = {
-    TITLE: `Abandoned Cart${cart.email ? ` — ${cart.email}` : ''}`,
+    TITLE: `[Online] Abandoned Cart${cart.email ? ` — ${cart.email}` : ''}`,
     OPPORTUNITY: parseFloat(cart.total_price || cart.subtotal_price || 0),
     CURRENCY_ID: tenant.currencyId,
     STATUS_ID: config.abandonedCartLeadStage,
     ASSIGNED_BY_ID: tenant.responsibleId,
-    UF_CRM_LEAD_SOURCE: 'Shopify Abandoned Cart',
+    SOURCE_ID: 'WEB',
+    SOURCE_DESCRIPTION: 'Shopify Online Store (Abandoned Cart)',
+    UF_CRM_LEAD_SOURCE: 'Online (Shopify Abandoned Cart)',
     UF_CRM_CART_TYPE: 'abandoned',
     UF_CRM_CART_ID: String(cart.id),
     UF_CRM_ABANDONED_URL: abandonedUrl,
@@ -148,12 +150,14 @@ const syncLeadFromCheckout = async (checkout, opts) => {
   const converted = checkout.completed_at || checkout.order;
   debug('lead', `syncLeadFromCheckout: converted=${Boolean(converted)} -> STATUS_ID=${converted ? 'WON' : config.checkoutLeadStage}`);
   const fields = {
-    TITLE: `Checkout Started${checkout.email ? ` — ${checkout.email}` : ''}`,
+    TITLE: `[Online] Checkout Started${checkout.email ? ` — ${checkout.email}` : ''}`,
     OPPORTUNITY: parseFloat(checkout.total_price || checkout.subtotal_price || 0),
     CURRENCY_ID: tenant.currencyId,
     STATUS_ID: converted ? 'WON' : config.checkoutLeadStage,
     ASSIGNED_BY_ID: tenant.responsibleId,
-    UF_CRM_LEAD_SOURCE: `Shopify Checkout (${att.channel || 'web'})`,
+    SOURCE_ID: 'WEB',
+    SOURCE_DESCRIPTION: `Shopify Online Store (${att.channel || 'web'})`,
+    UF_CRM_LEAD_SOURCE: `Online (Shopify Checkout - ${att.channel || 'web'})`,
     UF_CRM_CART_TYPE: 'checkout',
     UF_CRM_CART_ID: String(checkout.id),
     UF_CRM_ABANDONED_URL: checkout.abandoned_checkout_url || '',

@@ -926,7 +926,7 @@ const createShopifyProduct = async (product, shopDomain, accessToken, syncId = '
  * Create a Shopify DRAFT ORDER from a Bitrix deal (used by two-way sync).
  */
 const createShopifyDraftOrder = async (
-  { lineItems, customerId, note, email, shippingAddress, billingAddress, tags, discount, shippingLine },
+  { lineItems, customerId, note, email, shippingAddress, billingAddress, tags, discount, shippingLine, noteAttributes, note_attributes },
   shopDomain,
   accessToken,
   syncId = ''
@@ -936,6 +936,7 @@ const createShopifyDraftOrder = async (
   if (!customerId && email) draftOrder.email = email;
   if (note) draftOrder.note = note;
   if (tags) draftOrder.tags = tags;
+  if (noteAttributes || note_attributes) draftOrder.note_attributes = noteAttributes || note_attributes;
   if (shippingAddress) draftOrder.shipping_address = shippingAddress;
   if (billingAddress) draftOrder.billing_address = billingAddress;
   if (shippingLine) draftOrder.shipping_line = shippingLine;
