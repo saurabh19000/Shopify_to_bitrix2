@@ -365,10 +365,10 @@ const getProductImages = async (bitrixProductId, allowRetry = true) => {
   const attemptFetch = async () => {
     const list = [];
     try {
-      const imgList = await bitrixRequest('catalog.productImage.list', { productId: bitrixProductId });
+      const imgList = await bitrixRequest('catalog.productImage.list', { productId: Number(bitrixProductId) });
       const productImages = imgList?.result?.productImages || [];
       for (const img of productImages) {
-        let u = img.detailUrl || img.downloadUrl;
+        let u = img.detailUrl;
         if (u) {
           if (!u.startsWith('http') && portalUrl) {
             u = portalUrl + (u.startsWith('/') ? u : '/' + u);
@@ -382,13 +382,14 @@ const getProductImages = async (bitrixProductId, allowRetry = true) => {
       debug('bitrix', `getProductImages: catalog.productImage.list failed for ${bitrixProductId} (${err.message})`);
     }
 
+    // Secondary fallback: check crm.product.get if detailUrl is a CDN / direct upload link
     if (list.length === 0) {
       try {
         const prod = await getProduct(bitrixProductId);
         const pics = [prod?.DETAIL_PICTURE, prod?.PREVIEW_PICTURE].filter(Boolean);
         for (const pic of pics) {
-          let u = typeof pic === 'string' ? pic : (pic.detailUrl || pic.showUrl || pic.downloadUrl || pic.src);
-          if (u) {
+          let u = typeof pic === 'string' ? pic : (pic.detailUrl || pic.src);
+          if (u && (u.includes('cdn.bitrix24.') || u.includes('/upload/') || u.includes('/iblock/'))) {
             if (!u.startsWith('http') && portalUrl) {
               u = portalUrl + (u.startsWith('/') ? u : '/' + u);
             }
@@ -404,8 +405,20 @@ const getProductImages = async (bitrixProductId, allowRetry = true) => {
 
   let results = await attemptFetch();
   if (results.length === 0 && allowRetry) {
-    await sleep(1500);
+    console.log(`⏳ Image not ready yet on Bitrix CDN for product ${bitrixProductId} — polling again in 1.2s...`);
+    await sleep(1200);
     results = await attemptFetch();
+    if (results.length === 0) {
+      console.log(`⏳ Final retry for product ${bitrixProductId} image in 2s...`);
+      await sleep(2000);
+      results = await attemptFetch();
+    }
+  }
+
+  if (results.length > 0) {
+    console.log(`📸 Successfully retrieved ${results.length} image(s) for Bitrix product ${bitrixProductId}:`, results);
+  } else {
+    console.log(`ℹ️  Bitrix product ${bitrixProductId} has no images attached.`);
   }
 
   debug('bitrix', `getProductImages: found ${results.length} image(s) for Bitrix product ${bitrixProductId}`, { urls: results });

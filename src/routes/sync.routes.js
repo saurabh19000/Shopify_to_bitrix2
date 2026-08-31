@@ -620,21 +620,31 @@ const productUpdateHandler = async (req, res) => {
 
       // Loop Prevention: suppress echo events from our own Shopify->Bitrix sync
       if (isEchoLoop('BITRIX_TO_SHOPIFY', 'product', productId)) {
+        console.log(`[LOOP PREVENTION] Ignored echo event for Product ${productId}`);
         logLoopPrevention({ syncId, entity: 'product', bitrixId: productId, reason: 'echo_event_from_recent_shopify_sync' });
         return res.status(200).send('Echo event ignored (loop prevention)');
       }
 
+      console.log(`\n================== [BITRIX -> SHOPIFY PRODUCT SYNC] ==================`);
+      console.log(`📦 Event: ${event} | Bitrix Product ID: ${productId}`);
+
       // Fetch Complete Bitrix Product Data
       const product = await bitrixService.getProduct(productId);
       if (!product) {
+        console.error(`❌ Bitrix Product ${productId} not found in CRM`);
         logSyncFailed({ syncId, entity: 'product', bitrixId: productId, error: `Product ${productId} not found in Bitrix`, stage: 'DATA_FETCH' });
         return res.status(404).send(`Product ${productId} not found`);
       }
+
+      console.log(`🏷️  Product Name: "${product.NAME}" | Price: ₹${product.PRICE || 0} | SKU: ${product.CODE || 'None'}`);
 
       // Fetch Product Images from Bitrix
       const images = await bitrixService.getProductImages(productId);
       if (images && images.length > 0) {
         product.images = images;
+        console.log(`🖼️  Bitrix Images Found (${images.length}):`, images);
+      } else {
+        console.log(`⚠️  No images found in Bitrix for Product ${productId}`);
       }
 
       // Stage 3: Data Validation
@@ -649,6 +659,7 @@ const productUpdateHandler = async (req, res) => {
 
       const creds = await resolveShopifyCreds();
       if (!creds.shopDomain || !creds.accessToken) {
+        console.error(`❌ Shopify credentials not configured`);
         logSyncFailed({ syncId, entity: 'product', bitrixId: productId, error: 'Shopify credentials not configured', stage: 'AUTH_RESOLUTION' });
         return res.status(500).send('Shopify credentials not configured');
       }
@@ -662,11 +673,13 @@ const productUpdateHandler = async (req, res) => {
         if (existingByName) {
           shopifyProductId = existingByName.id;
           await setMapping('products', String(productId), String(shopifyProductId));
-          debug('twoway', `productUpdateHandler: matched existing Shopify product by title "${product.NAME}" -> ${shopifyProductId}`);
+          console.log(`🔗 Matched existing Shopify product by title "${product.NAME}" -> ID: ${shopifyProductId}`);
         }
       }
       if (shopifyProductId) {
-        debug('twoway', `productUpdateHandler: resolved shopifyProductId=${shopifyProductId} for Bitrix product ${productId}`);
+        console.log(`🔄 Updating existing Shopify Product ID: ${shopifyProductId}`);
+      } else {
+        console.log(`✨ Creating NEW Product in Shopify for "${product.NAME}"`);
       }
 
       // Case A: Mapped Product -> UPDATE (safely preserving Shopify variant IDs)
@@ -684,6 +697,7 @@ const productUpdateHandler = async (req, res) => {
 
         if (Object.keys(updateFields).length === 0) {
           logIdempotency({ syncId, entity: 'product', bitrixId: productId, shopifyId: shopifyProductId, reason: 'no_pushable_fields_changed' });
+          console.log(`ℹ️  No pushable fields changed for Product ${productId}`);
           return res.status(200).send('No pushable fields changed');
         }
 
@@ -698,13 +712,14 @@ const productUpdateHandler = async (req, res) => {
         });
 
         try {
-          await shopifyService.updateShopifyProduct(shopifyProductId, updateFields, creds.shopDomain, creds.accessToken, syncId);
+          const updated = await shopifyService.updateShopifyProduct(shopifyProductId, updateFields, creds.shopDomain, creds.accessToken, syncId);
           recordSync('BITRIX_TO_SHOPIFY', 'product', productId);
+          console.log(`✅ [SUCCESS] Updated Shopify Product ${shopifyProductId} | Attached Images: ${updated?.images?.length || 0}`);
           logSyncComplete({ syncId, entity: 'product', bitrixId: productId, shopifyId: shopifyProductId, duration: Date.now() - startedAt });
           return res.status(200).send('OK');
         } catch (prodErr) {
           if (prodErr.status === 404) {
-            debug('twoway', `productUpdateHandler: Shopify product ${shopifyProductId} returned 404 — falling back to create`);
+            console.warn(`⚠️ Shopify product ${shopifyProductId} returned 404 — falling back to create`);
           } else {
             throw prodErr;
           }
@@ -726,6 +741,7 @@ const productUpdateHandler = async (req, res) => {
       if (newProduct) {
         await setMapping('products', String(productId), String(newProduct.id));
         recordSync('BITRIX_TO_SHOPIFY', 'product', productId);
+        console.log(`✅ [SUCCESS] Created Shopify Product ID: ${newProduct.id} ("${newProduct.title}") | Attached Images: ${newProduct.images?.length || 0}`);
         logMappingSave({ syncId, entity: 'product', bitrixId: productId, shopifyId: newProduct.id, status: 'SUCCESS' });
         logSyncComplete({ syncId, entity: 'product', bitrixId: productId, shopifyId: newProduct.id, duration: Date.now() - startedAt });
         return res.status(200).send('OK');

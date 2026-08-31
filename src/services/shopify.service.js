@@ -374,20 +374,16 @@ const prepareShopifyImages = async (images) => {
       out.push(img);
       continue;
     }
-    const rawUrl = typeof img === 'string' ? img : (img.detailUrl || img.downloadUrl || img.showUrl || img.src);
+    const rawUrl = typeof img === 'string' ? img : (img.detailUrl || img.src);
     if (!rawUrl) continue;
 
-    if (rawUrl.startsWith('https://cdn.bitrix24.') || rawUrl.startsWith('https://cdn.shopify.com/')) {
+    // Discard internal Bitrix PHP component links that require browser login session
+    if (rawUrl.includes('/components/bitrix/') || rawUrl.includes('download.php')) {
+      continue;
+    }
+
+    if (rawUrl.startsWith('https://cdn.bitrix24.') || rawUrl.startsWith('https://cdn.shopify.com/') || rawUrl.startsWith('http')) {
       out.push({ src: rawUrl });
-    } else {
-      try {
-        const res = await axios.get(rawUrl, { responseType: 'arraybuffer', timeout: 25000 });
-        const base64 = Buffer.from(res.data, 'binary').toString('base64');
-        const filename = rawUrl.split('/').pop().split('?')[0] || 'product_image.jpg';
-        out.push({ attachment: base64, filename });
-      } catch (e) {
-        out.push({ src: rawUrl });
-      }
     }
   }
   return out;
