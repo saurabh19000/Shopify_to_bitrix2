@@ -649,10 +649,17 @@ const createProduct = async (product, shopDomain, accessToken, apiVersion) => {
   }
 
   const existingBitrixId = await getMappingWithFallback('products', product.id);
-  let productId;
+  let productId = existingBitrixId;
 
-  if (existingBitrixId) {
-    productId = existingBitrixId;
+  if (!productId && product.title) {
+    const existingByName = await findProductByName(product.title);
+    if (existingByName) {
+      productId = existingByName.ID;
+      debug('bitrix', `createProduct: found existing Bitrix product by name "${product.title}" -> ${productId}`);
+    }
+  }
+
+  if (productId) {
     debug('bitrix', `createProduct: UPDATING existing Bitrix product ${productId}`);
     await bitrixRequest('crm.product.update', { id: productId, fields });
   } else {

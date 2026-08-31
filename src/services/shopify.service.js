@@ -609,6 +609,24 @@ const findShopifyCustomerByPhone = async (phone, shopDomain, accessToken) => {
   }
 };
 
+/**
+ * Find a Shopify product by title (to prevent duplicate product creation).
+ */
+const findShopifyProductByTitle = async (title, shopDomain, accessToken) => {
+  if (!title) return null;
+  try {
+    const response = await axios.get(
+      `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/products.json?title=${encodeURIComponent(title)}&limit=1`,
+      { headers: getAuthHeaders(accessToken) }
+    );
+    const products = response.data?.products || [];
+    return products.length > 0 ? products[0] : null;
+  } catch (err) {
+    debug('shopify', `findShopifyProductByTitle failed for "${title}": ${err.message}`);
+    return null;
+  }
+};
+
 const extractFirstValue = (val) => {
   if (!val) return '';
   if (typeof val === 'string') return val.trim();
@@ -1182,6 +1200,7 @@ module.exports = {
   updateShopifyInventory,
   findShopifyCustomerByEmail,
   findShopifyCustomerByPhone,
+  findShopifyProductByTitle,
   createShopifyCustomer,
   createShopifyDraftOrder,
   completeShopifyDraftOrder

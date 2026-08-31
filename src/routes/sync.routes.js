@@ -591,14 +591,24 @@ router.post('/bitrix/deal-update', authorize, dealUpdateHandler);
 
 // ==================== PRODUCTS (Bitrix -> Shopify) ====================
 
+const inflightProductSyncs = new Map();
+
 const productUpdateHandler = async (req, res) => {
   const syncId = generateSyncId('BTX-SHP');
   const startedAt = Date.now();
 
-  return runWithRequestId(syncId, async () => {
-    try {
-      const { event, id: productId, rawPayload } = extractBitrixEventData(req, 'CRM_PRODUCT_UPDATE');
+  const { event, id: productId, rawPayload } = extractBitrixEventData(req, 'CRM_PRODUCT_UPDATE');
 
+  if (productId && inflightProductSyncs.has(productId)) {
+    debug('twoway', `productUpdateHandler: sync for product ${productId} already in-flight — awaiting existing sync`);
+    try {
+      await inflightProductSyncs.get(productId);
+    } catch (e) {}
+    return res.status(200).send('Concurrent product event processed via in-flight lock');
+  }
+
+  const syncPromise = runWithRequestId(syncId, async () => {
+    try {
       // Stage 1 & 2
       logBitrixEvent({ syncId, event, entityType: 'product', entityId: productId, payload: rawPayload });
       logBitrixPayload({ syncId, entity: 'product', entityId: productId, payload: rawPayload });
@@ -646,6 +656,14 @@ const productUpdateHandler = async (req, res) => {
       let shopifyProductId = await getShopifyIdByBitrixId('products', productId);
       if (!shopifyProductId) {
         shopifyProductId = await getMappingWithFallback('products', product.PRODUCT_ID || productId);
+      }
+      if (!shopifyProductId && product.NAME) {
+        const existingByName = await shopifyService.findShopifyProductByTitle(product.NAME, creds.shopDomain, creds.accessToken);
+        if (existingByName) {
+          shopifyProductId = existingByName.id;
+          await setMapping('products', String(productId), String(shopifyProductId));
+          debug('twoway', `productUpdateHandler: matched existing Shopify product by title "${product.NAME}" -> ${shopifyProductId}`);
+        }
       }
       if (shopifyProductId) {
         debug('twoway', `productUpdateHandler: resolved shopifyProductId=${shopifyProductId} for Bitrix product ${productId}`);
@@ -729,6 +747,17 @@ const productUpdateHandler = async (req, res) => {
       return res.status(err.status || err.response?.status || 500).send(err.message);
     }
   });
+
+  if (productId) {
+    inflightProductSyncs.set(productId, syncPromise);
+  }
+  try {
+    return await syncPromise;
+  } finally {
+    if (productId) {
+      inflightProductSyncs.delete(productId);
+    }
+  }
 };
 
 const contactDeleteHandler = async (req, res) => {
