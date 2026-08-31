@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 
 const { saveToken, getToken, deleteToken } = require('./utils/tokenStore');
 const { getMappingWithFallback, deleteMapping } = require('./utils/idMapStore');
-const { recordSync } = require('./utils/syncTracker');
+const { recordSync, isEchoLoop } = require('./utils/syncTracker');
 const bitrixService = require('./services/bitrix.service');
 const leadService = require('./services/lead.service');
 const invoiceService = require('./services/invoice.service');
