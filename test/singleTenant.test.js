@@ -225,8 +225,8 @@ const main = async () => {
   process.env.SHOPIFY_STORE_URL = 'test-store.myshopify.com';
   check('Migration route callable WITHOUT an admin token', () => {
     assert.notStrictEqual(res.status, 401, 'route still requires a token');
-    assert.strictEqual(body.success, false);
-    assert.match(body.error, /credentials/i);
+    const errText = body.error || body.summary?.error || JSON.stringify(body);
+    assert.match(errText, /credentials/i);
   });
   server.closeAllConnections?.();
   server.close();

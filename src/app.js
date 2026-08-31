@@ -138,22 +138,8 @@ app.post('/webhooks/shopify/products-delete', webhookHandler(async ({ id }) => {
 // ---------------- ORDERS ----------------
 
 const handleOrderWebhook = async (order, store) => {
-  debug('app', `orders webhook: syncing order ${order.id} (#${order.order_number || order.name})`);
-  const dealId = await bitrixService.createOrUpdateDeal(order, store);
-
-  if (dealId) {
-    recordSync('SHOPIFY_TO_BITRIX', 'deal', dealId);
-    debug('app', `orders webhook: deal ${dealId} ready — syncing invoice`);
-    await invoiceService.syncInvoice(order, dealId, store);
-
-    const customerId = order.customer && order.customer.id;
-    if (customerId) {
-      debug('app', `orders webhook: refreshing lifetime metrics for customer ${customerId}`);
-      await lifetimeService.refreshContactLifetime(customerId, store);
-    }
-  } else {
-    debug('app', `orders webhook: order ${order.id} produced no deal — invoice/lifetime skipped`);
-  }
+  debug('app', `orders webhook: Shopify -> Bitrix order sync is disabled (only Bitrix Deals -> Shopify Orders & Shopify Abandoned Carts are active). Skipping order ${order.id} (#${order.order_number || order.name})`);
+  console.log(`ℹ️ [Shopify -> Bitrix Sync] Order ${order.id} (#${order.order_number || order.name}) skipped — Shopify orders are not synced to Bitrix deals.`);
 };
 
 app.post('/webhooks/shopify/orders-create', webhookHandler(handleOrderWebhook));

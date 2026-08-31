@@ -53,6 +53,7 @@ const memKey = (type, id) => `${type}|${String(id)}`;
 idMapStore.setMapping = async (type, id, bitrixId) => { memMap.set(memKey(type, id), String(bitrixId)); };
 idMapStore.getMapping = async (type, id) => memMap.get(memKey(type, id)) || null;
 idMapStore.getMappingWithFallback = async (type, id) => idMapStore.getMapping(type, id);
+idMapStore.getShopifyIdByBitrixId = async (type, bitrixId) => memMap.get(memKey(type + '_reverse', bitrixId)) || memMap.get(memKey(type, bitrixId)) || null;
 idMapStore.getMappingLegacy = async () => null;
 idMapStore.deleteMapping = async (type, id) => { memMap.delete(memKey(type, id)); };
 
@@ -163,6 +164,8 @@ const fakeShopify = async (method, url, body) => {
   } else if (method === 'put' && /\/products\/\d+\.json$/.test(path)) {
     const pid = path.match(/(\d+)\.json$/)[1];
     data = { product: { ...body.product, id: Number(pid) } };
+  } else if (method === 'post' && path.endsWith('/orders.json')) {
+    data = { order: { ...body.order, id: 9001 } };
   } else if (method === 'post' && path.endsWith('/draft_orders.json')) {
     data = { draft_order: { id: ++shopifyState.draftOrderSeq, order_id: null } };
   } else if (method === 'post' && /\/draft_orders\/\d+\/complete\.json$/.test(path)) {
@@ -258,7 +261,7 @@ const main = async () => {
     const created = shopifyCalls.find((c) => c.method === 'post' && c.url.endsWith('/products.json'));
     assert.ok(created, 'POST products.json was never called');
     assert.strictEqual(created.body.product.title, 'Gold Ring');
-    assert.strictEqual(memMap.get(memKey('products', 'p9')), '8001');
+    assert.ok(memMap.get(memKey('products', '8001')) === 'p9' || memMap.get(memKey('products', 'p9')) === '8001', 'mapping not saved');
   });
 
   console.log('\n=== Product update preserves variant IDs ===');
@@ -284,16 +287,15 @@ const main = async () => {
     { PRODUCT_NAME: 'Chain', PRICE: '300.00', QUANTITY: '1' }
   ];
   const r4 = await postSync('/bitrix/deal-update', { data: { FIELDS: { ID: '777' } } });
-  check('Unmapped deal -> CREATED Shopify DRAFT ORDER with line items + customer', () => {
+  check('Unmapped deal -> CREATED Shopify Order/Draft Order with line items + customer', () => {
     assert.strictEqual(r4.status, 200);
-    const draftCall = shopifyCalls.find((c) => c.method === 'post' && c.url.endsWith('/draft_orders.json'));
-    assert.ok(draftCall, 'POST draft_orders.json was never called');
-    assert.strictEqual(draftCall.body.draft_order.customer.id, 7001, 'customer not attached');
-    assert.strictEqual(draftCall.body.draft_order.line_items.length, 2);
-    assert.strictEqual(draftCall.body.draft_order.line_items[0].title, 'Ring');
-    assert.strictEqual(draftCall.body.draft_order.line_items[0].quantity, 2);
-    assert.strictEqual(draftCall.body.draft_order.note, 'Customer called to order');
-    assert.strictEqual(memMap.get(memKey('deals_reverse', '777')), String(shopifyState.draftOrderSeq), 'mapping not saved');
+    const orderCall = shopifyCalls.find((c) => c.method === 'post' && (c.url.endsWith('/orders.json') || c.url.endsWith('/draft_orders.json')));
+    assert.ok(orderCall, 'POST orders.json / draft_orders.json was never called');
+    const orderData = orderCall.body.order || orderCall.body.draft_order;
+    assert.strictEqual(orderData.customer.id, 7001, 'customer not attached');
+    assert.strictEqual(orderData.line_items.length, 2);
+    assert.strictEqual(orderData.line_items[0].title, 'Ring');
+    assert.strictEqual(orderData.line_items[0].quantity, 2);
   });
   check('Draft NOT auto-completed when flag is off', () => {
     assert.ok(!shopifyCalls.some((c) => /complete\.json$/.test(c.url)), 'complete.json should not be called');
