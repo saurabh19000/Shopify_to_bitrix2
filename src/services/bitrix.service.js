@@ -400,6 +400,34 @@ const getProductImages = async (bitrixProductId, allowRetry = true) => {
         debug('bitrix', `getProductImages: fallback check failed for ${bitrixProductId} (${err.message})`);
       }
     }
+
+    // Tertiary fallback: check child SKU / Offer variations (iblock 16)
+    if (list.length === 0) {
+      try {
+        const skuRes = await bitrixRequest('catalog.product.list', {
+          select: ['id', 'iblockId', 'parentId'],
+          filter: { 'iblockId': 16 }
+        });
+        const allSkus = skuRes?.result?.products || [];
+        const matchingSkus = allSkus.filter(s => String(s.parentId?.value || s.parentId) === String(bitrixProductId));
+        for (const sku of matchingSkus) {
+          if (sku.id) {
+            const skuImgList = await bitrixRequest('catalog.productImage.list', { productId: Number(sku.id) });
+            for (const sImg of skuImgList?.result?.productImages || []) {
+              let u = sImg.detailUrl;
+              if (u) {
+                if (!u.startsWith('http') && portalUrl) {
+                  u = portalUrl + (u.startsWith('/') ? u : '/' + u);
+                }
+                if (!list.includes(u)) list.push(u);
+              }
+            }
+          }
+        }
+      } catch (skuErr) {
+        debug('bitrix', `getProductImages: SKU variation image check failed for ${bitrixProductId} (${skuErr.message})`);
+      }
+    }
     return list;
   };
 
