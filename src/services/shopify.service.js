@@ -394,6 +394,20 @@ const prepareShopifyImages = async (images) => {
 };
 
 /**
+ * Upload an image directly to a Shopify product's media gallery.
+ */
+const uploadShopifyProductImage = async (shopifyProductId, imageObj, shopDomain, accessToken) => {
+  try {
+    const endpoint = `https://${shopDomain}/admin/api/${config.shopifyApiVersion}/products/${shopifyProductId}/images.json`;
+    const res = await axios.post(endpoint, { image: imageObj }, { headers: getAuthHeaders(accessToken) });
+    return res.data?.image;
+  } catch (err) {
+    debug('shopify', `uploadShopifyProductImage: direct upload failed for product ${shopifyProductId} (${err.message})`);
+    return null;
+  }
+};
+
+/**
  * Push updated product fields from Bitrix product back to Shopify.
  */
 const updateShopifyProduct = async (shopifyProductId, fields, shopDomain, accessToken, syncId = '') => {
@@ -464,7 +478,19 @@ const updateShopifyProduct = async (shopifyProductId, fields, shopDomain, access
       response: response.data,
       duration
     });
-    return response.data.product;
+
+    let updatedProduct = response.data.product;
+    if ((!updatedProduct?.images || updatedProduct.images.length === 0) && product.images?.length > 0) {
+      debug('shopify', `updateShopifyProduct: images array empty in response — performing direct image uploads...`);
+      for (const img of product.images) {
+        const uploadedImg = await uploadShopifyProductImage(shopifyProductId, img, shopDomain, accessToken);
+        if (uploadedImg) {
+          if (!updatedProduct.images) updatedProduct.images = [];
+          updatedProduct.images.push(uploadedImg);
+        }
+      }
+    }
+    return updatedProduct;
   } catch (err) {
     const duration = Date.now() - startTime;
     const statusCode = err.response?.status || 500;
@@ -795,7 +821,18 @@ const createShopifyProduct = async (product, shopDomain, accessToken, syncId = '
       response: response.data,
       duration
     });
-    return response.data.product;
+    let createdProduct = response.data.product;
+    if ((!createdProduct?.images || createdProduct.images.length === 0) && payload.product.images?.length > 0) {
+      debug('shopify', `createShopifyProduct: images array empty in response — performing direct image uploads...`);
+      for (const img of payload.product.images) {
+        const uploadedImg = await uploadShopifyProductImage(createdProduct.id, img, shopDomain, accessToken);
+        if (uploadedImg) {
+          if (!createdProduct.images) createdProduct.images = [];
+          createdProduct.images.push(uploadedImg);
+        }
+      }
+    }
+    return createdProduct;
   } catch (err) {
     const duration = Date.now() - startTime;
     const statusCode = err.response?.status || 500;

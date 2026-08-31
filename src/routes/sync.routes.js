@@ -932,7 +932,7 @@ router.post('/bitrix/event', authorize, async (req, res) => {
         }
       }
       else if (eventName.includes('DEAL') || eventName.includes('ORDER')) kind = 'deal';
-      else if (eventName.includes('PRODUCT')) kind = 'product';
+      else if (eventName.includes('PRODUCT') || eventName.includes('CATALOG') || eventName.includes('ELEMENT') || eventName.includes('IBLOCK')) kind = 'product';
 
       if (!kind) {
         debug('twoway', `event-dispatcher: ${eventName} not mapped to an entity — ignoring`);
